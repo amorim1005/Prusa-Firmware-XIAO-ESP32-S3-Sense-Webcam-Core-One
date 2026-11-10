@@ -28,6 +28,7 @@ PrusaConnect::PrusaConnect(Configuration *i_conf, Logs *i_log, Camera *i_camera,
   BackendAvailability = WaitForFirstConnection;
   SendDeviceInformationToBackend = true;
   SendingIntervalCounter = 0;
+  SendNow = false;
   BackoffInterval = 0;
   ConnectFailCounter = 0;
   UploadOkCount = 0;
@@ -923,8 +924,9 @@ void PrusaConnect::SetSendingIntervalCounter(uint16_t i_data) {
   SendingIntervalCounter = i_data;
 }
 
+/* called also from the WEB server and the Wi-Fi events: a flag, the counter belongs to the photo task */
 void PrusaConnect::SetSendingIntervalExpired() {
-  SendingIntervalCounter = UINT16_MAX;
+  SendNow = true;
 }
 
 /**
@@ -936,7 +938,10 @@ void PrusaConnect::SetSendingIntervalExpired() {
  */
 bool PrusaConnect::CheckSendingIntervalExpired(uint16_t i_interval) {
   bool ret = false;
-  if (SendingIntervalCounter >= i_interval) {
+  if (true == SendNow) {
+    SendNow = false;
+    ret = true;
+  } else if (SendingIntervalCounter >= i_interval) {
     ret = true;
   }
 

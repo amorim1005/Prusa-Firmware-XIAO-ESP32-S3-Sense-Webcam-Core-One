@@ -9,7 +9,7 @@ This repository is a **fork** of the official firmware
 (base version **v1.1.2**, commit `136c91c`, by Miroslav Pivovarsky). The full original history is
 kept, and the changes of this fork are in the commits on top of it.
 
-Firmware version: **1.1.2-c21** (see the [version history](#version-history)).
+Firmware version: **1.1.2-c22** (see the [version history](#version-history)).
 The compiled firmware is in the [latest release](https://github.com/amorim1005/Prusa-Firmware-XIAO-ESP32-S3-Sense-Webcam-Core-One/releases/latest).
 
 > **Tested** on a Seeed XIAO ESP32S3 Sense with the **OV3660** sensor (version c17, including a
@@ -230,8 +230,10 @@ token is shown only partly (`****************Uhq?`): paste a new token to change
 8. Optional: set up [PrusaLink](#prusalink).
 
 **Wi-Fi.** The camera also connects to a **hidden** network (type its name), and it keeps trying
-when the router starts after the camera, for example after a power cut. After 3 failed attempts
-(network not found, wrong password) it tries once every 28 s, so the service AP stays easy to find.
+when the router starts after the camera, for example after a power cut. Until the first
+connection, after 3 failed attempts (network not found, wrong password) it tries once every 28 s,
+so the service AP stays easy to find. A camera that was connected and lost the network reconnects
+at once, as before.
 
 **Wi-Fi Enterprise** (company or school network, WPA2/WPA3-Enterprise with PEAP, user name and
 password): Wi-Fi page → Advanced Wi-Fi settings → *Wi-Fi Enterprise*: network name, user name and
@@ -386,8 +388,8 @@ module, the new sensor is detected and saved.
   driver logs `FB-OVF`). The quality slider stops at 10, which avoids the worst cases.
 - If the image is upside down or mirrored, use **Vertical flip** / **Horizontal mirror** on the
   Camera page. The firmware does not flip any sensor by itself.
-- **OV3660 brightness (c19).** The original settings were written for the OV2640: on the OV3660 they
-  limited the automatic gain to "no gain" and wrote the manual exposure and gain also with the
+- **OV3660 and OV5640 brightness (c19, OV5640 since c22).** The original settings were written for
+  the OV2640: on these sensors they limited the automatic gain to "no gain" and wrote the manual exposure and gain also with the
   automatic control on, so the picture was dark (fix from the fork of
   [dawidkulpa](https://github.com/dawidkulpa/Prusa-Firmware-ESP32-Cam)). If you raised
   **Brightness** to compensate, set it back to the middle.
@@ -655,6 +657,14 @@ Service hostname and the 10 min interval), and the original firmware cannot read
 ## Version history
 
 Newest first. Every version is based on the original Prusa firmware v1.1.2.
+
+**1.1.2-c22** (2026-11-10)
+- OV5640: the brighter picture fix of the OV3660 also for the OV5640 (same driver code, not tested
+  on a real OV5640)
+- Wi-Fi: the slow retries only until the first connection; after a lost connection the camera
+  reconnects at once again
+- The photo after the Wi-Fi connection can no longer be lost between two tasks
+- Log texts and the developer documentation updated
 
 **1.1.2-c21** (2026-11-06)
 - A photo is sent as soon as the camera is connected to the Wi-Fi (after a start or a lost

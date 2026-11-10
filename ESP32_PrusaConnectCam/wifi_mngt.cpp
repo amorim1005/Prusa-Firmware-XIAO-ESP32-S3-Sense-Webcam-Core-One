@@ -217,7 +217,7 @@ void WiFiMngt::WiFiReconnect() {
     WiFiStaConnect();
   } else if (WiFi.status() == WL_CONNECTED) {
     char cstr[150];
-    sprintf(cstr, "Wifi connected. SSID: %s, BSSID: %s, RSSI: %d dBm, IP: %s, TX power: %s", WiFi.SSID().c_str(), WiFi.BSSIDstr().c_str(), WiFi.RSSI(), WiFi.localIP().toString().c_str(), TranslateTxPower(WiFi.getTxPower()).c_str());  //print 3 digits
+    sprintf(cstr, "Connected. SSID: %s, BSSID: %s, RSSI: %d dBm, IP: %s, TX power: %s", WiFi.SSID().c_str(), WiFi.BSSIDstr().c_str(), WiFi.RSSI(), WiFi.localIP().toString().c_str(), TranslateTxPower(WiFi.getTxPower()).c_str());  //print 3 digits
     log->AddEvent(LogLevel_Info, "Wi-Fi status: " + String(cstr));
   }
 
@@ -310,6 +310,12 @@ void WiFiMngt::WiFiStaConnect() {
    @return none
 */
 void WiFiMngt::StaConnectFailed(uint8_t i_reason) {
+  /* only before the first connection (wrong network name or password, network not there at the start). A camera that
+     was connected and lost the network keeps the fast reconnect of the core, for a weak Wi-Fi or a short outage */
+  if (true == FirstConnected) {
+    return;
+  }
+
   /* network not found, rejected by the AP, and a wrong password: WPA2 ends with 15 or 204 (handshake timeout) or 2,
      WPA3 with 202. The core 3.3.x repeats most of them immediately */
   switch (i_reason) {
@@ -647,7 +653,7 @@ String WiFiMngt::TranslateWiFiStatus(wl_status_t i_wifi_status) {
       ret = F("Disconnected");
       break;
     case WL_NO_SHIELD:
-      ret = F("No WiFi shield");
+      ret = F("No Wi-Fi shield");
       break;
     default:
       ret = F("Unkcnown status");
@@ -1311,7 +1317,7 @@ void WiFiMngt_WiFiEventApStaConnected(WiFiEvent_t event, WiFiEventInfo_t info) {
   uint8_t mac[6] = { 0 };
   char msg[100] = { '\0' };
   memcpy(mac, info.wifi_ap_staconnected.mac, 6);
-  sprintf(msg, "WiFi AP STA. station connected to AP, MAC: %02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  sprintf(msg, "Wi-Fi AP STA. station connected to AP, MAC: %02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
   SystemLog.AddEvent(LogLevel_Info, msg);
 }
 
@@ -1326,7 +1332,7 @@ void WiFiMngt_WiFiEventApStaDisconnected(WiFiEvent_t event, WiFiEventInfo_t info
   char msg[100] = { '\0' };
   memcpy(mac, info.wifi_ap_stadisconnected.mac, 6);
   // String(info.wifi_ap_stadisconnected.reason)
-  sprintf(msg, "WiFi AP STA. station dicconnected from AP, MAC: %02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  sprintf(msg, "Wi-Fi AP STA. station disconnected from AP, MAC: %02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
   SystemLog.AddEvent(LogLevel_Info, msg);
 }
 

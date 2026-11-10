@@ -146,7 +146,8 @@ cache) to `SW_VERSION`. `--check` only reports what is out of date. Build **afte
 | `libraries/` | **New**: libraries with the exact versions |
 | `build_xiao.sh` | **New**: build script |
 | `firmware/` | Compiled firmware of c1–c9. **Removed** (c10): the binaries are in the GitHub releases |
-| `test/web/` | **New** (c10): browser test of the web pages. (c11) Photo size estimate. (c12) Smallest resolution, Saved confirmation, status LED, UTF-8 check mark, footer. (c13) Stream page messages when the camera is hot |
+| `test/web/` | **New** (c10): browser test of the web pages. (c11) Photo size estimate. (c12) Smallest resolution, Saved confirmation, status LED, UTF-8 check mark, footer. (c13) Stream page messages when the camera is hot. (c16) Header for changes, POST, token mask. (c19) Wi-Fi Enterprise |
+| c14–c22, in several files | (c16) `WebServer.cpp`: header for changes (CSRF), host name check, passwords with POST; core 3.3.12 and new libraries. (c17) Mutex for the settings shared between tasks in `connect.cpp`, `prusalink.cpp`, `wifi_mngt.cpp`. (c18) `camera.cpp`: copy of the last good photo for `/saved-photo.jpg`. (c19) `wifi_mngt.cpp`, `cfg.cpp`, `mcu_cfg.h`: Wi-Fi of the original 1.1.3 (hidden networks, retries, Wi-Fi Enterprise with new EEPROM bytes at the end); `camera.cpp`: OV3660 gain. (c21) Photo after the Wi-Fi connection. (c22) OV5640 gain, send-now flag in `connect.cpp` |
 
 To see every change line by line against the original:
 ```bash

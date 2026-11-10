@@ -36,7 +36,8 @@ private:
   String BackendReceivedStatus;                   ///< status of backend response
   BackendAvailabilitStatus BackendAvailability;   ///< status of backend availability
   bool SendDeviceInformationToBackend;            ///< flag for sending device information to backend
-  uint16_t SendingIntervalCounter;                ///< counter for sending interval, represents seconds
+  uint16_t SendingIntervalCounter;                ///< counter for sending interval, represents seconds. Only the photo task changes it
+  volatile bool SendNow;                          ///< send a photo in the next cycle. Set from other tasks (WEB server, Wi-Fi events), cleared by the photo task
   uint16_t BackoffInterval;                       ///< interval after a failed upload [s]. 0 = no backoff
   uint16_t ConnectFailCounter;                    ///< count of consecutive failed connections to the backend server
   bool EnableTimelapsPhotoSave;                   ///< flag for saving photo to SD card

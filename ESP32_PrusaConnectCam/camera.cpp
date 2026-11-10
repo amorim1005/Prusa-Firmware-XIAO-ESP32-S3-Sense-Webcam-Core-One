@@ -504,11 +504,12 @@ void Camera::ApplyCameraCfg() {
   CAMERA_SENSOR_SET(set_exposure_ctrl, exposure_ctrl);   // exposition controll 0 = disable , 1 = enable
   CAMERA_SENSOR_SET(set_aec2, aec2);                     // enable exposition controll 0 = disable , 1 = enable
   CAMERA_SENSOR_SET(set_ae_level, ae_level);             // automatic exposition level -2 to 2
-  /* OV3660: the automatic exposure and gain continue from the manual exposure time and gain registers, a manual value
-     written while the automatic control is on makes the picture dark. The gain ceiling of the OV3660 driver is the raw
-     gain limit and not gainceiling_t, 0 = no gain at all, the sensor default is kept. The manual gain is the real gain,
-     0 = black, the level 0 - 30 is sent as 1x - 31x. Other sensors use the same calls as before (from the fork of dawidkulpa) */
-  bool ov3660 = (OV3660_PID == sensor->id.PID);
+  /* OV3660 and OV5640 (the same driver code): the automatic exposure and gain continue from the manual exposure time and
+     gain registers, a manual value written while the automatic control is on makes the picture dark. The gain ceiling of
+     these drivers is the raw gain limit and not gainceiling_t, 0 = no gain at all, the sensor default is kept. The manual
+     gain is the real gain, 0 = black, the level 0 - 30 is sent as 1x - 31x. The OV2640 uses the same calls as before
+     (OV3660 fix from the fork of dawidkulpa) */
+  bool ov3660 = (OV3660_PID == sensor->id.PID) || (OV5640_PID == sensor->id.PID);
   if ((false == ov3660) || (false == exposure_ctrl)) {
     CAMERA_SENSOR_SET(set_aec_value, aec_value);         // expozition time - 0 to 1200
   }
@@ -517,7 +518,7 @@ void Camera::ApplyCameraCfg() {
     CAMERA_SENSOR_SET(set_agc_gain, agc_gain);           // automatic gain controll level 0 to 30
     CAMERA_SENSOR_SET(set_gainceiling, (gainceiling_t)0);  // maximum gain 0 to 6
   } else if (false == gain_ctrl) {
-    CAMERA_SENSOR_SET(set_agc_gain, agc_gain + 1);       // OV3660 real gain 1x - 31x
+    CAMERA_SENSOR_SET(set_agc_gain, agc_gain + 1);       // OV3660, OV5640: real gain 1x - 31x
   }
   CAMERA_SENSOR_SET(set_bpc, bpc);                       // bad pixel correction 0 = disable , 1 = enable
   CAMERA_SENSOR_SET(set_wpc, wpc);                       // white pixel correction 0 = disable , 1 = enable
