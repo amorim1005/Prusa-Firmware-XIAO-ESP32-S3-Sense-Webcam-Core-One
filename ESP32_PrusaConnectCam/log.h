@@ -27,6 +27,9 @@ private:
   File LogFile;               ///< log file object
   bool LogFileOpened;         ///< log file opened status
   SemaphoreHandle_t LogMutex; ///< log mutex
+  uint32_t LastFlushTime;     ///< time of the last log file flush [ms]
+
+  bool CheckFlush(LogLevel_enum);
 
 public:
   Logs();
@@ -40,12 +43,10 @@ public:
   void LogOpenFile();
   void LogCloseFile();
   void LogCheckOpenedFile();
+  void LogFlushFile();
   void AddEvent(LogLevel_enum, String, bool = true, bool = true);
   void AddEvent(LogLevel_enum, const __FlashStringHelper*, String, bool = true, bool = true);
   void SetLogLevel(LogLevel_enum);
-  void SetFileName(String);
-  void SetFilePath(String);
-  void SetFileMaxSize(uint16_t);
   void SetNtpTimeSynced(bool);
 
   String GetFileName();

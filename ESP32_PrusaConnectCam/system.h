@@ -12,52 +12,34 @@
 #pragma once
 
 #include <WiFi.h>
-#include <Update.h>
 #include <Arduino.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
-#include <HTTPUpdate.h>
 #include <ArduinoJson.h>
 #include <esp_wifi.h>
 #include <esp_task_wdt.h>
 
-#if defined(CONFIG_IDF_TARGET_ESP32)
-    #include "esp32/rom/rtc.h"
-#elif defined(CONFIG_IDF_TARGET_ESP32S3)
-    #include "esp32s3/rom/rtc.h"
-#else
-    #error "Unsupported chip target"
-#endif
+#include "esp32s3/rom/rtc.h"
+#include "driver/temperature_sensor.h"
 
 #include "mcu_cfg.h"
 #include "var.h"
 #include "cfg.h"
 #include "log.h"
-#include "Certificate_ota.h"
 #include "wifi_mngt.h"
 #include "connect.h"
+#include "prusalink.h"
 #include "serial_cfg.h"
 #include "sys_led.h"
-#include "ExternalTemperatureSensor.h"
-
-#define SYSTEM_MSG_UPDATE_DONE    F("FW update successfully done! Please reboot the MCU.")
-#define SYSTEM_MSG_UPDATE_FAIL    F("FW update failed! Please reboot MCU, and try again.")
-#define SYSTEM_MSG_UPDATE_PROCESS F("FW update in progress")
-#define SYSTEM_MSG_UPDATE_NO_FW   F("No new FW version available!")
 
 void System_Init();
 void System_LoadCfg();
 bool System_CheckIfPsramIsUsed();
 void System_Main();
-void System_UpdateInit();
-
-void System_CheckNewVersion();
-void System_OtaCloudUpdate();
-bool System_OtaUpdateStart();
-void System_OtaUpdateProgressCB(int, int);
-void System_OtaUpdateErrorCB(int);
-void System_OtaUpdateEndCB();
-void System_OtaUpdateStartCB();
+void System_CheckMemory();
+String System_GetHealthStatus();
+String System_GetRestartReasonText(esp_reset_reason_t, SystemRestartReason_enum);
+bool System_IsUnplannedRestart(esp_reset_reason_t, SystemRestartReason_enum);
 
 String System_PrintMcuResetReason(int);
 String System_printMcuResetReasonSimple();
@@ -65,6 +47,9 @@ String System_printMcuResetReasonSimple();
 void System_TaskWifiManagement(void *);
 void System_TaskMain(void *);
 void System_TaskCaptureAndSendPhoto(void *);
+void System_CheckThermalState();
+float System_ReadMcuTemperature();
+uint16_t System_GetUploadInterval();
 void System_TaskSdCardCheck(void *);
 void System_TaskSerialCfg(void *);
 void System_TaskSystemTelemetry(void *);

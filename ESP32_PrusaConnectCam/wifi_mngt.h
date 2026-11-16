@@ -15,6 +15,7 @@
 #include <esp_task_wdt.h>
 #include <ESPmDNS.h>
 #include <esp_wifi.h>
+#include <esp_eap_client.h>
 #include <esp32-hal-cpu.h>
 
 #include "mcu_cfg.h"
@@ -53,7 +54,12 @@ class WiFiMngt {
 private:
   String WifiSsid;                    ///< WI-FI SSID
   String WifiPassword;                ///< WI-FI password
-  bool ServiceMode;                   ///< flag for enable service AP mode after MCU start during STA_AP_MODE_TIMEOUT ms
+  bool WifiEapEnable;                 ///< Wi-Fi Enterprise (PEAP) is enabled, connect with WifiEapUsername and WifiEapPassword
+  String WifiEapIdentity;             ///< Wi-Fi Enterprise anonymous identity, empty = user name
+  String WifiEapUsername;             ///< Wi-Fi Enterprise user name
+  String WifiEapPassword;             ///< Wi-Fi Enterprise password
+  volatile uint8_t StaConnectFailCount; ///< consecutive failed STA connections (network not found, rejected by the AP)
+  bool ServiceMode;                   ///< flag for enable service AP mode after MCU start, until SERVICE_AP_OFF_DELAY after the connection to the Wi-Fi network
   String WiFiMode;                    ///< Wi-Fi mode (AP, STA, STA_AP)
   String SericeApSsid;                ///< Service AP SSID
   bool FirstConnected;                ///< flag about first connecting to WiFi network status
@@ -76,11 +82,14 @@ private:
   IPAddress Service_Subnet;           ///< Service mask when si module in the AP mode
   IPAddress Service_Dns;              ///< Service DNS when is module in the AP mode
 
-  unsigned long TaskAp_previousMillis;  ///< previous time for task AP
+  unsigned long StaConnectedSince;      ///< time of the connection to the Wi-Fi network [ms], 0 = not connected
   unsigned long TaskWdg_previousMillis; ///< previous time for task STA watchdog
 
-  String mDNS_record;                 ///< mDNS record
+  String mDNS_record;                 ///< mDNS record, also the camera name. A new name is used by mDNS and DHCP after the next start
+  String StartMdns;                   ///< mDNS record used since the start
+  String DhcpHostname;                ///< DHCP host name used since the start, made from the mDNS record
   String WifiScanJson;                ///< global variable with wifi networks
+  SemaphoreHandle_t CfgMutex;         ///< mutex for the strings shared between tasks: SSID, password, Wi-Fi mode, mDNS record
 
   Configuration *config;              ///< pointer to configuration class
   Logs *log;                          ///< pointer to log class
@@ -96,6 +105,8 @@ public:
   void WiFiReconnect();
   void SetWifiEvents();
   void WiFiStaConnect();
+  void StaConnectFailed(uint8_t);
+  void StaConnectDone();
   void SyncNtpTime();
 
   void ScanWiFiNetwork();
@@ -111,15 +122,16 @@ public:
   String GetServiceApSsid();
   String GetStaSsid();
   String GetStaBssid();
-  String GetStaPassword();
   String GetStaStatus();
   String GetStaIp();
   String GetAvailableWifiNetworks();
   String GetWiFiMode();
   String GetWifiMac();
   String GetMdns();
+  String GetStartMdns();
+  String GetDhcpHostname();
+  static String MakeDhcpHostname(String);
   bool GetEnableServiceAp();
-  bool GetkActifeWifiCfgFlag();
   bool GetNtpFirstTimeSync();
   bool GetFirstConnection();
   uint8_t GetNetIpMethod();
@@ -127,16 +139,22 @@ public:
   String GetNetStaticMask();
   String GetNetStaticGateway();
   String GetNetStaticDns();
+  bool GetStaEapEnable();
+  String GetStaEapIdentity();
+  String GetStaEapUsername();
+  bool GetStaEapPasswordSaved();
 
   void SetStaCredentials(String, String);
   void SetStaSsid(String);
   void SetStaPassword(String);
   void SetEnableServiceAp(bool);
   void ConnectToSta();
-  void SetMdns(String);
+  bool SetMdns(String);
   void SetFirstConnection(bool);
   void SetNetworkConfig(String, String, String, String);
   void SetNetIpMethod(uint8_t);
+  void SetStaEapNetwork(String, String, String, String);
+  bool SetStaEapEnable(bool);
 };
 
 extern WiFiMngt SystemWifiMngt;   ///< global variable for wifi management

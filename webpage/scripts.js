@@ -1,139 +1,302 @@
-function get_data(val) {
-	jQuery.ajax({
-		url: 'json_input',
-		type: 'GET',
-		timeout: 5000,
-		success: function(data) {
-			console.log("Incommming data: ");
-			console.log(data);
-			var obj = JSON.parse(data);
-			console.log(obj);
+/* set the text of an element, a missing element is skipped */
+function setText(id, value) {
+	var element = document.getElementById(id);
+	if (element) {
+		element.textContent = value;
+	}
+}
 
-			if (!document.querySelector('#light-icon img')) {
-				var img = document.createElement('img');
-				img.src = (obj.led == "true") ? 'light-on-icon.svg' : 'light-off-icon.svg';
-				document.getElementById('light-icon').appendChild(img);
-			}
-			document.title = obj.mdns;
-			
-			if (val == "config") {
-				$("#fingerprint").text(obj.fingerprint);
-				$("#refreshInterval").text(obj.refreshInterval);
-				document.getElementById('tokenid').value = obj.token;
-				document.getElementById('refreshid').value = obj.refreshInterval;
-				document.getElementById('photo_qualityid').value = obj.photoquality;
-				document.getElementById('framesizeid').value = obj.framesize;
-				document.getElementById('brightnessid').value = obj.brightness;
-				document.getElementById('contrastid').value = obj.contrast;
-				document.getElementById('saturationid').value = obj.saturation;
-				document.getElementById('image_rotationid').value = obj.image_rotation;
-				document.getElementById('hmirrorid').checked = obj.hmirror;
-				document.getElementById('vflipid').checked = obj.vflip;
-				document.getElementById('lencid').checked = obj.lensc;
-				document.getElementById('exposure_ctrlid').checked = obj.exposure_ctrl;
-				document.getElementById('awbid').checked = obj.awb;
-				document.getElementById('awb_gainid').checked = obj.awb_gain;
-				document.getElementById('wb_modeid').value = obj.wb_mode;
-				document.getElementById('ledid').checked = obj.led;
-				document.getElementById('flashid').checked = obj.flash;
-				document.getElementById('flash_timeid').value = obj.flash_time;
-				document.getElementById('bpcid').checked = obj.bpc;
-				document.getElementById('wpcid').checked = obj.wpc;
-				document.getElementById('raw_gamaid').checked = obj.raw_gama;
-				document.getElementById('aec2id').checked = obj.aec2;
-				document.getElementById('ae_levelid').value = obj.ae_level;
-				document.getElementById('aec_valueid').value = obj.aec_value;
-				document.getElementById('gain_ctrlid').checked = obj.gain_ctrl;
-				document.getElementById('agc_gainid').value = obj.agc_gain;
-				document.getElementById("flash_time_value").innerText = obj.flash_time;
-				document.getElementById("aec_value_value").innerText = obj.aec_value;
-				document.getElementById('timelapsid').checked = obj.timelaps;
-				$("#status_hmirror").text((obj.hmirror == "true") ? "On" : "Off");
-				$("#status_vflip").text((obj.vflip == "true") ? "On" : "Off");
-				$("#status_lensc").text((obj.lensc == "true") ? "On" : "Off");
-				$("#status_exposure_ctrl").text((obj.exposure_ctrl == "true") ? "On" : "Off");
-				$("#status_awb").text((obj.awb == "true") ? "On" : "Off");
-				$("#status_awb_gain").text((obj.awb_gain == "true") ? "On" : "Off");
-				$("#status_led").text((obj.led == "true") ? "On" : "Off");
-				$("#status_flash").text((obj.flash == "true") ? "On" : "Off");
-				$("#status_bpc").text((obj.bpc == "true") ? "On" : "Off");
-				$("#status_wpc").text((obj.wpc == "true") ? "On" : "Off");
-				$("#status_raw_gama").text((obj.raw_gama == "true") ? "On" : "Off");
-				$("#status_aec2").text((obj.aec2 == "true") ? "On" : "Off");
-				$("#status_gain_ctrl").text((obj.gain_ctrl == "true") ? "On" : "Off");
-				$("#status_timelaps").text((obj.timelaps == "true") ? "On" : "Off");
-				sliderCheck();
-			}
-
-			if (val == "auth") {
-				document.getElementById('authid').checked = obj.auth;
-				$("#status_auth").text((obj.auth == "true") ? "On" : "Off");
-				document.getElementById('auth_username').value = obj.auth_username;
-			}
-
-			if (val == "wifi") {
-				document.getElementById('serviceapid').checked = obj.serviceap;
-				$("#status_serviceap").text((obj.serviceap == "true") ? "On" : "Off");
-				$("#ssid").text(obj.ssid);
-				$("#rssi").text(obj.rssi);
-				$("#rssi_percentage").text(obj.rssi_percentage);
-				$("#ip").text(obj.ip);
-				$("#mdns").text(obj.mdns);
-				$("#wifi_network_status").text(obj.wifi_network_status);
-				document.getElementById('ipcfgid').value = obj.ip_cfg;
-				document.getElementById('net_ip_id').value = obj.net_ip;
-				document.getElementById('net_mask_id').value = obj.net_mask;
-				document.getElementById('net_gw_id').value = obj.net_gw;
-				document.getElementById('net_dns_id').value = obj.net_dns;
-
-				if (!document.querySelector('#main-wifi-signal wifi_img')) {
-					var wifi_img = document.createElement('wifi_img');
-					wifi_img.width = 19;
-					wifi_img.height = 12;
-					wifi_img.src = getIconPath(obj.rssi);
-					document.getElementById('main-wifi-signal').appendChild(wifi_img);
-				}
-			}
-
-			if (val == "system") {
-				$("#uptime").text(obj.uptime);
-				$("#sw_ver").text(obj.sw_ver);
-				$("#sw_build").text(obj.sw_build);
-				$("#last_upload_status").text(obj.last_upload_status);
-				$("#wifi_mode").text(obj.wifi_mode);
-				$("#sw_new_ver").text(obj.sw_new_ver);
-				$("#service_ap_ssid").text(obj.service_ap_ssid);
-				$("#sd_status").text(obj.sd_status);
-				$("#sd_total").text(obj.sd_total);
-				$("#sd_free_p").text(obj.sd_free_p);
-				$("#sd_used_p").text(obj.sd_used_p);
-				$("#mcu_temp").text(obj.mcu_temp);
-
-				var sd_free_prog = document.getElementById("progress_bar_sd_free");
-				sd_free_prog.style.width = obj.sd_free_p + "%";
-				sd_free_prog.innerHTML = obj.sd_free_p + "%";
-
-				var sd_free_prog = document.getElementById("progress_bar_sd_used");
-				sd_free_prog.style.width = obj.sd_used_p + "%";
-				sd_free_prog.innerHTML = obj.sd_used_p + "%";
-
-				document.getElementById('mdnsid').value = obj.mdns;
-        		document.getElementById('loglevelid').value = obj.log_level;
-			}
-
-			if (val == "temp") {
-				$("#extsens_stat").text(obj.extsens_stat);
-				document.getElementById('extsetsid').checked = obj.extsen_en;
-				document.getElementById('temp_unitid').value = obj.exttemp_unit;
-				$("#ext_temp").text(obj.ext_temp);
-				$("#ext_hum").text(obj.ext_hum);
-			}
-		},
-		error: function(html) {
-			console.log("json Timeout or error");
-			//alert("jquery timeout or comunication error");
-		}
+/* GET request with a timeout, returns a promise with the response text */
+function getText(url, timeout) {
+	var controller = new AbortController();
+	var timer = setTimeout(function() { controller.abort(); }, timeout);
+	return fetch(url, { signal: controller.signal }).then(function(response) {
+		clearTimeout(timer);
+		return response.text();
 	});
+}
+
+function get_data(val) {
+	getText('json_input', 5000).then(function(data) {
+		var obj = JSON.parse(data);
+
+		document.title = obj.mdns;
+		setText('refreshInterval', obj.upload_interval);
+		
+		if (val == "config") {
+			setText('fingerprint', obj.fingerprint);
+			/* the camera sends only the end of the token, a new token is pasted into the empty field.
+			   The field is not cleared here: a pasted token stays when another setting is changed before Save */
+			document.getElementById('tokenid').placeholder = (obj.token != "") ? obj.token : "paste the token from Prusa Connect";
+			document.getElementById('refreshid').value = obj.refreshInterval;
+			document.getElementById('photo_qualityid').value = obj.photoquality;
+			/* show only the resolutions supported by the detected camera sensor */
+			var supported = obj.framesize_supported.split(",");
+			var framesizeOptions = document.getElementById('framesizeid').options;
+			for (var i = 0; i < framesizeOptions.length; i++) {
+				var available = supported.includes(framesizeOptions[i].value);
+				framesizeOptions[i].hidden = !available;
+				framesizeOptions[i].disabled = !available;
+			}
+			document.getElementById('framesizeid').value = obj.framesize;
+			setText('camera_detected', obj.camera_detected);
+			setText('camera_autofocus', obj.camera_autofocus);
+			document.getElementById('brightnessid').value = obj.brightness;
+			document.getElementById('contrastid').value = obj.contrast;
+			document.getElementById('saturationid').value = obj.saturation;
+			document.getElementById('image_rotationid').value = obj.image_rotation;
+			document.getElementById('hmirrorid').checked = (obj.hmirror == "true");
+			document.getElementById('vflipid').checked = (obj.vflip == "true");
+			document.getElementById('lencid').checked = (obj.lensc == "true");
+			document.getElementById('exposure_ctrlid').checked = (obj.exposure_ctrl == "true");
+			document.getElementById('awbid').checked = (obj.awb == "true");
+			document.getElementById('awb_gainid').checked = (obj.awb_gain == "true");
+			document.getElementById('wb_modeid').value = obj.wb_mode;
+			document.getElementById('bpcid').checked = (obj.bpc == "true");
+			document.getElementById('wpcid').checked = (obj.wpc == "true");
+			document.getElementById('raw_gamaid').checked = (obj.raw_gama == "true");
+			document.getElementById('aec2id').checked = (obj.aec2 == "true");
+			document.getElementById('ae_levelid').value = obj.ae_level;
+			document.getElementById('aec_valueid').value = obj.aec_value;
+			document.getElementById('gain_ctrlid').checked = (obj.gain_ctrl == "true");
+			document.getElementById('agc_gainid').value = obj.agc_gain;
+			document.getElementById("aec_value_value").innerText = obj.aec_value;
+			document.getElementById('timelapsid').checked = (obj.timelaps == "true");
+			document.getElementById('prusalinkid').checked = (obj.prusalink_enable == "true");
+			document.getElementById('prusalink_hostid').value = obj.prusalink_host;
+			document.getElementById('prusalink_userid').value = obj.prusalink_user;
+			setText('status_prusalink', (obj.prusalink_enable == "true") ? "On" : "Off");
+			setText('prusalink_status', obj.prusalink_status);
+			setText('printer_state', obj.printer_state);
+			setText('job_progress', (obj.printer_state == "PRINTING") ? obj.job_progress + " %" : "");
+			setText('status_hmirror', (obj.hmirror == "true") ? "On" : "Off");
+			setText('status_vflip', (obj.vflip == "true") ? "On" : "Off");
+			setText('status_lensc', (obj.lensc == "true") ? "On" : "Off");
+			setText('status_exposure_ctrl', (obj.exposure_ctrl == "true") ? "On" : "Off");
+			setText('status_awb', (obj.awb == "true") ? "On" : "Off");
+			setText('status_awb_gain', (obj.awb_gain == "true") ? "On" : "Off");
+			setText('status_bpc', (obj.bpc == "true") ? "On" : "Off");
+			setText('status_wpc', (obj.wpc == "true") ? "On" : "Off");
+			setText('status_raw_gama', (obj.raw_gama == "true") ? "On" : "Off");
+			setText('status_aec2', (obj.aec2 == "true") ? "On" : "Off");
+			setText('status_gain_ctrl', (obj.gain_ctrl == "true") ? "On" : "Off");
+			setText('status_timelaps', (obj.timelaps == "true") ? "On" : "Off");
+			sliderCheck();
+			PhotoSizeData = obj;
+			updatePhotoSizeEstimate();
+		}
+
+		if (val == "auth") {
+			document.getElementById('authid').checked = (obj.auth == "true");
+			setText('status_auth', (obj.auth == "true") ? "On" : "Off");
+			document.getElementById('auth_username').value = obj.auth_username;
+		}
+
+		if (val == "wifi") {
+			document.getElementById('serviceapid').checked = (obj.serviceap == "true");
+			setText('status_serviceap', (obj.serviceap == "true") ? "On" : "Off");
+			document.getElementById('wpa2_eapid').checked = (obj.wpa2_eap == "true");
+			setText('status_wpa2_eap', (obj.wpa2_eap == "true") ? "On" : "Off");
+			document.getElementById('wpa2_eap_identity_id').value = obj.wpa2_eap_identity;
+			document.getElementById('wpa2_eap_user_id').value = obj.wpa2_eap_user;
+			if (obj.wpa2_eap == "true") {
+				document.getElementById('wpa2_eap_ssid_id').value = obj.ssid;
+			}
+			setText('ssid', obj.ssid);
+			setText('rssi', obj.rssi);
+			setText('rssi_percentage', obj.rssi_percentage);
+			setText('ip', obj.ip);
+			setText('mdns', obj.mdns);
+			setText('wifi_network_status', obj.wifi_network_status);
+			document.getElementById('ipcfgid').value = obj.ip_cfg;
+			document.getElementById('net_ip_id').value = obj.net_ip;
+			document.getElementById('net_mask_id').value = obj.net_mask;
+			document.getElementById('net_gw_id').value = obj.net_gw;
+			document.getElementById('net_dns_id').value = obj.net_dns;
+
+			if (!document.querySelector('#main-wifi-signal wifi_img')) {
+				var wifi_img = document.createElement('wifi_img');
+				wifi_img.width = 19;
+				wifi_img.height = 12;
+				wifi_img.src = getIconPath(obj.rssi);
+				document.getElementById('main-wifi-signal').appendChild(wifi_img);
+			}
+		}
+
+		if (val == "system") {
+			setText('uptime', obj.uptime);
+			setText('sw_ver', obj.sw_ver);
+			checkLatestRelease(obj.sw_ver);
+			setText('sw_build', obj.sw_build);
+			setText('last_upload_status', obj.last_upload_status);
+			setText('wifi_mode', obj.wifi_mode);
+			setText('service_ap_ssid', obj.service_ap_ssid);
+			setText('sd_status', obj.sd_status);
+			setText('sd_total', obj.sd_total);
+			setText('sd_free_p', obj.sd_free_p);
+			setText('sd_used_p', obj.sd_used_p);
+			setText('mcu_temp', obj.mcu_temp);
+			setText('upload_interval', obj.upload_interval);
+			setText('health_status', obj.health_status);
+			setText('upload_ok', obj.upload_ok);
+			setText('upload_failed', obj.upload_failed);
+			setText('unplanned_restarts', obj.unplanned_restarts);
+			setText('last_restart', obj.last_restart);
+			setText('mcu_temp_max', obj.mcu_temp_max);
+			setText('mem_internal', obj.mem_internal);
+			setText('mem_psram', obj.mem_psram);
+
+			var sd_free_prog = document.getElementById("progress_bar_sd_free");
+			sd_free_prog.style.width = obj.sd_free_p + "%";
+			sd_free_prog.innerHTML = obj.sd_free_p + "%";
+
+			var sd_free_prog = document.getElementById("progress_bar_sd_used");
+			sd_free_prog.style.width = obj.sd_used_p + "%";
+			sd_free_prog.innerHTML = obj.sd_used_p + "%";
+
+			document.getElementById('mdnsid').value = obj.mdns;
+			document.getElementById('loglevelid').value = obj.log_level;
+			document.getElementById('status_ledid').value = obj.status_led;
+		}
+	}).catch(function(error) {
+		console.log("json timeout or error: " + error);
+	});
+}
+
+/* photo size estimate on the Camera page. The size grows with the pixels and with the JPEG quality.
+   With a photo from this camera the estimate scales its real size, so it knows the scene. Without a photo
+   it uses a typical scene */
+var PhotoSizeData = null;
+
+/* pixels of a resolution from the list, the option text starts with "1600x1200" */
+function photoPixels(framesize) {
+	var option = document.querySelector('#framesizeid option[value="' + framesize + '"]');
+	if (!option) {
+		return 0;
+	}
+	var size = option.text.split(' ')[0].split('x');
+	return parseInt(size[0]) * parseInt(size[1]);
+}
+
+/* relative bytes per pixel of a JPEG quality 10-63 (lower is better) */
+function photoQualityFactor(quality) {
+	return Math.pow(10 / quality, 0.8);
+}
+
+function updatePhotoSizeEstimate() {
+	var estimateText = document.getElementById('photo_size_estimate');
+	var warningText = document.getElementById('photo_size_warning');
+	if (!PhotoSizeData || !estimateText || !warningText) {
+		return;
+	}
+
+	var data = PhotoSizeData;
+	var max = data.photo_max_size;
+	var pixels = photoPixels(document.getElementById('framesizeid').value);
+	/* the slider is reversed: right = better quality = lower JPEG quality value, like on the camera */
+	var quality = 73 - document.getElementById('photo_qualityid').value;
+	var lastPixels = photoPixels(data.last_photo_framesize);
+	var estimate = 0;
+	var margin = 0;
+	var basis = "";
+
+	if ((data.last_photo_size > 0) && (lastPixels > 0) && (data.last_photo_quality >= 10)) {
+		estimate = data.last_photo_size * (pixels / lastPixels) * (photoQualityFactor(quality) / photoQualityFactor(data.last_photo_quality));
+		margin = 1.2;
+		basis = "based on the last photo";
+	} else {
+		estimate = pixels * 0.14 * photoQualityFactor(quality);
+		margin = 1.5;
+		basis = "typical scene, no photo yet";
+	}
+
+	var size = (estimate >= 1000000) ? ((estimate / 1000000).toFixed(2) + " MB") : (Math.round(estimate / 1000) + " KB");
+	estimateText.textContent = "about " + size + " (" + basis + ")";
+
+	if (estimate > max) {
+		estimateText.style.color = "#d32f2f";
+		warningText.style.color = "#d32f2f";
+		warningText.textContent = "Too large: this firmware only supports photos up to 1 MB (Prusa Camera Service limit), larger photos are not uploaded. Lower the resolution or the image quality.";
+	} else if ((estimate * margin) > max) {
+		estimateText.style.color = "#e08a00";
+		warningText.style.color = "#e08a00";
+		warningText.textContent = "Close to the 1 MB limit: a photo with more detail can be larger and is then not uploaded.";
+	} else {
+		estimateText.style.color = "#2e7d32";
+		warningText.style.color = "";
+		warningText.textContent = "";
+	}
+}
+
+/* a newer release on GitHub. The browser asks GitHub, not the camera. The row is shown only when a newer version exists,
+   nothing is shown without a release, without internet in the browser (for example on the service AP) or when up to date.
+   Asked once per page load */
+var LatestRelease = null;
+
+/* numbers of a version, "v1.1.2-c14" -> [1, 1, 2, 14] */
+function versionNumbers(version) {
+	return (String(version).match(/[0-9]+/g) || []).map(function(n) { return parseInt(n); });
+}
+
+/* > 0 when version a is newer than version b */
+function compareVersions(a, b) {
+	var x = versionNumbers(a);
+	var y = versionNumbers(b);
+	for (var i = 0; i < Math.max(x.length, y.length); i++) {
+		var d = (x[i] || 0) - (y[i] || 0);
+		if (d != 0) {
+			return d;
+		}
+	}
+	return 0;
+}
+
+function showLatestRelease(installed) {
+	var row = document.getElementById('latest_release_row');
+	var cell = document.getElementById('latest_release');
+	if (!row || !cell || !LatestRelease || !LatestRelease.version || (compareVersions(LatestRelease.version, installed) <= 0)) {
+		return;
+	}
+	var link = document.createElement('a');
+	link.href = LatestRelease.url;
+	link.target = "_blank";
+	link.rel = "noopener";
+	link.textContent = LatestRelease.version;
+	cell.textContent = "";
+	cell.append("There is a new version. Latest release: ", link);
+	row.style.display = "";
+}
+
+function checkLatestRelease(installed) {
+	if (LatestRelease) {
+		showLatestRelease(installed);
+		return;
+	}
+	fetch('https://api.github.com/repos/amorim1005/Prusa-Firmware-XIAO-ESP32-S3-Sense-Webcam-Core-One/releases/latest', { cache: 'no-store' }).then(function(response) {
+		if (!response.ok) {
+			return {};
+		}
+		return response.json().then(function(release) {
+			return { version: String(release.tag_name).replace(/^v/, ""), url: release.html_url };
+		});
+	}).catch(function(error) {
+		return {};
+	}).then(function(release) {
+		LatestRelease = release;
+		showLatestRelease(installed);
+	});
+}
+
+/* the photo was read from the camera: its real size is the new base of the estimate, when the Camera page is open */
+function photoLoaded() {
+	if (document.getElementById('photo_size_estimate')) {
+		get_data("config");
+	}
+}
+
+function setupPhotoSizeEstimate() {
+	document.getElementById('photo_qualityid').addEventListener('input', updatePhotoSizeEstimate);
+	document.getElementById('framesizeid').addEventListener('change', updatePhotoSizeEstimate);
 }
 
 function sliderCheck() {
@@ -190,8 +353,24 @@ function openImage() {
 	OpenImageclickCount++;
 }
 
+/* request that changes the camera. The header shows the camera that the request comes from its own page: a page of
+   another site cannot add it (CORS), so it cannot change the camera (CSRF). POST data is form encoded */
+function cameraRequest(method, url, async) {
+	var xhr = new XMLHttpRequest();
+	xhr.open(method, url, async);
+	xhr.setRequestHeader("X-Requested-With", "PrusaESP32Cam");
+	return xhr;
+}
+
+function cameraPost(url, data) {
+	var xhr = cameraRequest("POST", url, false);
+	xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+	xhr.send(data);
+	return xhr;
+}
+
 function actionButton(url, reload, msg) {
-    var xhr = new XMLHttpRequest();
+    var xhr = cameraRequest('GET', url, true);
     
 	if (msg != '') {
 		alert(msg);
@@ -207,7 +386,6 @@ function actionButton(url, reload, msg) {
         }
     };
 
-    xhr.open('GET', url, true);
     xhr.send();
 }
 
@@ -239,26 +417,31 @@ function addClickListener(id) {
 
 /* wifi page */
 function setWifi(val_ssid, val_pass) {
-	var xmlHttp = new XMLHttpRequest();
-	xmlHttp.open("GET", "wifi_cfg?wifi_ssid=" +  encodeURIComponent(val_ssid) + "&wifi_pass=" + encodeURIComponent(val_pass), false);
-	xmlHttp.send(null);
-	alert(xmlHttp.responseText);
+	/* POST: the password is not in the URL */
+	var xmlHttp = cameraPost("wifi_cfg", "wifi_ssid=" + encodeURIComponent(val_ssid) + "&wifi_pass=" + encodeURIComponent(val_pass));
+	showSaveResult(xmlHttp.responseText, xmlHttp.status);
+	get_data("wifi");
+}
+
+function setWPA2EAP(val_ssid, val_identity, val_user, val_pass) {
+	/* POST: the password is not in the URL. Empty password = the saved password stays */
+	var xmlHttp = cameraPost("wifi_wpa2_eap", "ssid=" + encodeURIComponent(val_ssid) + "&identity=" + encodeURIComponent(val_identity) + "&user=" + encodeURIComponent(val_user) + "&pass=" + encodeURIComponent(val_pass));
+	showSaveResult(xmlHttp.responseText, xmlHttp.status);
+	document.getElementById('wpa2_eap_pass_id').value = "";
 	get_data("wifi");
 }
 
 function setWifiNet(val_ip, val_mask, val_gw, val_dns) {	
-	var xmlHttp = new XMLHttpRequest();
-	xmlHttp.open("GET", "wifi_net_cfg?ip=" +  encodeURIComponent(val_ip) + "&mask=" + encodeURIComponent(val_mask) + "&gw=" + encodeURIComponent(val_gw) + "&dns=" + encodeURIComponent(val_dns), false);
+	var xmlHttp = cameraRequest("GET", "wifi_net_cfg?ip=" +  encodeURIComponent(val_ip) + "&mask=" + encodeURIComponent(val_mask) + "&gw=" + encodeURIComponent(val_gw) + "&dns=" + encodeURIComponent(val_dns), false);
 	xmlHttp.send(null);
-	alert(xmlHttp.responseText);
+	showSaveResult(xmlHttp.responseText, xmlHttp.status);
 	get_data("wifi");
 }
 
 function scanWifi() {
-	var xmlHttp = new XMLHttpRequest();
-	xmlHttp.open("GET", "wifi_scan?", false);
+	var xmlHttp = cameraRequest("GET", "wifi_scan?", false);
 	xmlHttp.send(null);
-	alert(xmlHttp.responseText);
+	showSaveResult(xmlHttp.responseText, xmlHttp.status);
 	get_data("wifi");
 	setTimeout(function() {
 		GetDataAndPrintTableWiFi();
@@ -266,57 +449,91 @@ function scanWifi() {
 }
 
 function GetDataAndPrintTableWiFi() {
-	$("#wifi_ntw").find("tr:gt(0)").remove();
-	$.ajax({
-		url: 'json_wifi',
-		type: 'GET',
-		timeout: 15000,
-		dataType: 'json',
-		data: {},
-
-		success: function(data) {
-			for (var i = 0; i < data.length; i++) {
-				const IconName = "wifi-icon-" + i;
-				var row = $('<tr><td>' + data[i].ssid + '</td><td><div id="' + IconName + '" style="display: flex; align-items: center;"></div></td><td>' + data[i].channel + '</td><td>' + data[i].encryption + '</td></tr>');
-				$('#wifi_ntw').append(row);
-
-				if (!document.querySelector('#' + IconName + ' img')) {
-					var img = document.createElement('img');
-					img.src = getIconPath(data[i].rssi);
-					document.getElementById(IconName).prepend(img);
-					document.getElementById(IconName).append(data[i].rssi_percentage);
-					document.getElementById(IconName).append("% / ");
-					document.getElementById(IconName).append(data[i].rssi);
-					document.getElementById(IconName).append("dBm");
-				}
-			}
-		},
-		error: function(jqXHR, textStatus, errorThrown) {
-			console.log('Error:' + textStatus + '-' + errorThrown);
+	var table = document.getElementById('wifi_ntw');
+	/* keep the header row */
+	while (table.rows.length > 1) {
+		table.deleteRow(1);
+	}
+	getText('json_wifi', 15000).then(function(text) {
+		var data = JSON.parse(text);
+		for (var i = 0; i < data.length; i++) {
+			var row = table.insertRow(-1);
+			var signal = document.createElement('div');
+			signal.style.display = 'flex';
+			signal.style.alignItems = 'center';
+			var img = document.createElement('img');
+			img.src = getIconPath(data[i].rssi);
+			signal.append(img, data[i].rssi_percentage + "% / " + data[i].rssi + "dBm");
+			row.insertCell(-1).textContent = data[i].ssid;
+			row.insertCell(-1).appendChild(signal);
+			row.insertCell(-1).textContent = data[i].channel;
+			row.insertCell(-1).textContent = data[i].encryption;
 		}
+	}).catch(function(error) {
+		console.log('Error: ' + error);
 	});
+}
+
+/* PrusaLink cfg, the password is sent only when the user typed a new one */
+function setPrusaLink() {
+	var data = "enable=" + document.getElementById('prusalinkid').checked
+		+ "&host=" + encodeURIComponent(document.getElementById('prusalink_hostid').value)
+		+ "&user=" + encodeURIComponent(document.getElementById('prusalink_userid').value)
+		+ "&password=" + encodeURIComponent(document.getElementById('prusalink_passwordid').value);
+	var xmlHttp = cameraPost("set_prusalink", data);
+	showSaveResult(xmlHttp.responseText, xmlHttp.status);
+	document.getElementById('prusalink_passwordid').value = "";
+	get_data("config");
 }
 
 /* auth page */
 function setAuth(val_name, val_pass) {
-	var xmlHttp = new XMLHttpRequest();
-	xmlHttp.open("GET", "basicauth_cfg?" + "auth_username=" + encodeURIComponent(val_name) + "&auth_password=" + encodeURIComponent(val_pass), false);
-	xmlHttp.send(null);
-	alert(xmlHttp.responseText);
+	var xmlHttp = cameraPost("basicauth_cfg", "auth_username=" + encodeURIComponent(val_name) + "&auth_password=" + encodeURIComponent(val_pass));
+	showSaveResult(xmlHttp.responseText, xmlHttp.status);
 	get_data("auth");
 }
 
-function changeValue(val, url, reload, msg) {
-	var xmlHttp = new XMLHttpRequest();
-	xmlHttp.open("GET", url + val, false);
+/* save a new Prusa Connect token, the field is cleared after a successful save */
+function saveToken() {
+	var field = document.getElementById('tokenid');
+	var xmlHttp = cameraRequest("GET", "set_token?token=" + encodeURIComponent(field.value), false);
 	xmlHttp.send(null);
-	if ((url == "set_int?refresh=") || (url == "set_token?token=") || (url == "set_mdns?mdns=") || (url == "set_int?ipcfg=")) {
-		alert(xmlHttp.responseText);
+	showSaveResult(xmlHttp.responseText, xmlHttp.status);
+	if ((xmlHttp.status == 200) && !xmlHttp.responseText.startsWith("ERROR")) {
+		field.value = "";
 	}
-	if (url == "set_flash_time?flash_time=") {
-		document.getElementById("flash_time_value").innerText = val;
-	}
+	get_data("config");
+}
+
+function changeValue(val, url, reload, msg) {
+	var xmlHttp = cameraRequest("GET", url + val, false);
+	xmlHttp.send(null);
+	showSaveResult(xmlHttp.responseText, xmlHttp.status);
 	get_data(reload);
+}
+
+/* result of a save as a short message at the bottom instead of a popup. The settings are saved on every change without
+   a Save button. "Save cfg OK" is shown as "Saved" for 2 s, other messages (reboot needed, registration, errors) longer with their text */
+var SaveStatusTimer = null;
+function showSaveResult(text, status) {
+	var ok = (status == 200) && !text.startsWith("ERROR") && (text.indexOf("NOT OK") < 0);
+	var plain = (text == "Save cfg OK") || (text == "Save cfg NOT OK!") || (text == "");
+	var toast = document.getElementById('save_status');
+	if (!toast) {
+		toast = document.createElement('div');
+		toast.id = 'save_status';
+		toast.className = 'save_status';
+		document.body.appendChild(toast);
+	}
+	if (plain) {
+		toast.innerHTML = ok ? "Saved &#10004;" : "Not saved &#10006;";
+	} else {
+		toast.textContent = text;
+	}
+	toast.style.backgroundColor = ok ? "#2e7d32" : "#d32f2f";
+	toast.style.display = "block";
+	clearTimeout(SaveStatusTimer);
+	SaveStatusTimer = setTimeout(function() { toast.style.display = "none"; }, (plain && ok) ? 2000 : 6000);
 }
 
 function togglePasswordVisibility() {
@@ -335,118 +552,42 @@ function togglePasswordVisibility() {
 	}
 }
 
-/* system page */
-if (typeof uploadingFirmware === 'undefined') {
-	var uploadingFirmware = false;
-}
+/* system page: firmware update from file */
+function uploadFirmware() {
+	var file = document.getElementById('firmwareInput').files[0];
+	var status = document.getElementById('firmwareStatus');
+	var bar = document.getElementById('firmwareProgress');
 
-if (typeof FileSize === 'undefined') {
-	var FileSize = 0;
-}
-
-function uploadFile() {
-	alert("Started updating...");
-	const firmwareInput = document.getElementById('firmwareInput');
-	const statusDiv = document.getElementById('status');
-	const file = firmwareInput.files[0];
-	FileSize = file.size;
-	SetFirmwareSize(file.size);
-
-	if (file) {
-		statusDiv.innerText = 'Updating...';
-		const formData = new FormData();
-		formData.append('firmware', file);
-		uploadingFirmware = true;
-
-		fetch('/upload', {
-				method: 'POST',
-				body: formData,
-			})
-			.then((response) => {
-				if (response.ok) {
-					response.text().then((data) => {
-						const jsonData = JSON.parse(data);
-						updateProgress();
-						uploadingFirmware = false;
-						if (jsonData.errorMessage) {
-							alert(`Error message: ${jsonData.errorMessage}`);
-						}
-					});
-				} else {
-					uploadingFirmware = false;
-					response.text().then((errorMessage) => {
-						alert(`Error message: ${errorMessage}`);
-					});
-				}
-			})
-			.catch((error) => {
-				console.error('Error:', error);
-				uploadingFirmware = false;
-			});
-	} else {
-		statusDiv.innerText = 'No file selected';
+	if (!file) {
+		status.innerText = 'No file selected';
+		return;
 	}
-}
-
-function SetFirmwareSize(val) {
-	var xmlHttp = new XMLHttpRequest();
-	xmlHttp.open("GET", "set_firmware_size?size=" + val, false);
-	xmlHttp.send(null);
-}
-
-function updateProgress() {
-	if (!uploadingFirmware) {
+	if (!confirm('Install ' + file.name + '? The camera restarts after the upload.')) {
 		return;
 	}
 
-	fetch('/UpdateProcessing', {
-			method: 'GET',
-		})
-		.then((response) => {
-			if (response.ok) {
-				return response.json();
-			} else {
-				throw new Error('Failed to fetch progress');
-			}
-		})
-		.then((data) => {
-			const statusDiv = document.getElementById('status');
-			var progressBar = document.getElementById("myProgressBar");
-			progressBar.style.width = data.processed_percent + "%";
-			progressBar.innerHTML = data.processed_percent + "%";
+	var formData = new FormData();
+	formData.append('firmware', file, file.name);
 
-			statusDiv.innerText = data.message;
-			uploadingFirmware = data.updating;
-			if (data.updating == false  && !updateCompleted) {
-				alert('Operation done. Please reboot MCU.');
-				uploadingFirmware = false;
-				updateCompleted = true;
-				clearInterval(updateInterval);
-			}
-		})
-		.catch((error) => {
-			console.error('Error:', error);
-			var progressBar = document.getElementById("myProgressBar");
-			progressBar.innerHTML = "Error";
-			clearInterval(updateInterval);
-		});
-}
-
-function checkUpdate() {
-	var xmlHttp = new XMLHttpRequest();
-	alert("Connecting to server... Please wait several seconds");
-	xmlHttp.open("GET", "/check_web_ota_update", false);
-	xmlHttp.send(null);
-	alert(xmlHttp.responseText);
-	get_data("system");
-}
-
-function updateWeb() {
-	alert("Started updating from cloud.");
-	var xmlHttp = new XMLHttpRequest();
-	xmlHttp.open("GET", "web_ota_update?update=true", false);
-	xmlHttp.send(null);
-	uploadingFirmware = true;
+	var xhr = cameraRequest('POST', 'upload_firmware', true);
+	xhr.upload.onprogress = function(e) {
+		if (e.lengthComputable) {
+			var p = Math.round(e.loaded * 100 / e.total);
+			bar.style.width = p + '%';
+			bar.innerHTML = p + '%';
+		}
+	};
+	xhr.onload = function() {
+		status.innerText = xhr.responseText;
+		if (xhr.status == 200) {
+			setTimeout(function() { location.reload(); }, 20000);
+		}
+	};
+	xhr.onerror = function() {
+		status.innerText = 'Upload failed: connection error';
+	};
+	status.innerText = 'Uploading...';
+	xhr.send(formData);
 }
 
 function validatePasswords() {
@@ -476,26 +617,21 @@ if ((document.getElementById("auth_password")) && (document.getElementById("auth
 	validatePasswords();
 }
 
+/* the section after the button opens and closes */
+function setupCollapsible(selector) {
+	document.querySelectorAll(selector).forEach(function(button) {
+		button.addEventListener('click', function() {
+			button.classList.toggle('active');
+			var content = button.parentElement.nextElementSibling;
+			content.style.display = (getComputedStyle(content).display === 'block') ? 'none' : 'block';
+		});
+	});
+}
+
 function setupCollapsibleButtons() {
-    $(".btn_collapsible").click(function(){
-        $(this).toggleClass("active");
-        var content = $(this).parent().next();
-        if (content.css("display") === "block") {
-            content.css("display", "none");
-        } else {
-            content.css("display", "block");
-        }
-    });
+	setupCollapsible('.btn_collapsible');
 }
 
 function setupCollapsibleButtonsWiFi() {
-    $(".btn_collapsible_wifi").click(function(){
-        $(this).toggleClass("active");
-        var content_wifi = $(this).parent().next();
-        if (content_wifi.css("display") === "block") {
-            content_wifi.css("display", "none");
-        } else {
-            content_wifi.css("display", "block");
-        }
-    });
+	setupCollapsible('.btn_collapsible_wifi');
 }

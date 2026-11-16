@@ -12,27 +12,92 @@
 #ifndef _MCU_CFG_H_
 #define _MCU_CFG_H_
 
-/* ----------------- CAMERA TYPE  ---------------*/
-#define AI_THINKER_ESP32_CAM            true
-#define ESP32_WROVER_DEV                false
-#define CAMERA_MODEL_ESP32_S3_DEV_CAM   false
-#define CAMERA_MODEL_ESP32_S3_EYE_2_2   false
-#define CAMERA_MODEL_XIAO_ESP32_S3_CAM  false
-#define CAMERA_MODEL_ESP32_S3_CAM       false
-#define ESP32_S3_WROOM_FREENOVE         false
+/* the only supported board is the XIAO ESP32-S3 Sense, its pins are in module_XIAO_ESP32-S3-cam.h */
 
 /* ---------------- BASIC MCU CFG  --------------*/
-#define SW_VERSION                  "1.1.2"                 ///< SW version
+#define SW_VERSION                  "1.1.2-c1"               ///< SW version
 #define SW_BUILD                    __DATE__ " " __TIME__   ///< build number
 #define CONSOLE_VERBOSE_DEBUG       false                   ///< enable/disable verbose debug log level for console
-#define DEVICE_HOSTNAME             "Prusa-ESP32cam"        ///< device hostname
+#define DEVICE_HOSTNAME             "Prusa-ESP32cam"        ///< DHCP host name when the camera name has no valid character. Normally the DHCP host name is the camera name (mDNS record)
+#define WIFI_DHCP_HOSTNAME_MAX_LENGTH 31                    ///< maximum length of the DHCP host name (the core keeps 32 bytes with the terminating 0)
 #define CAMERA_MAX_FAIL_CAPTURE     10                      ///< maximum count for failed capture
+#define CAMERA_SEMAPHORE_TIMEOUT    5000                    ///< maximum waiting time for the camera frame buffer semaphore [ms]
+
+/* ------------------ LIVE STREAM ---------------*/
+/* A capture task fills the stream buffers in turn, the WEB server sends the latest complete frame.
+   The capture of the next frame runs while the current frame is being sent */
+#define CAMERA_STREAM_BUFFERS       3                       ///< count of stream frame buffers in PSRAM (one per client + one in capture)
+#define CAMERA_STREAM_MAX_CLIENTS   2                       ///< maximum count of stream clients at the same time
+#define CAMERA_STREAM_FRAME_TIMEOUT 3000                    ///< maximum waiting time for a new stream frame [ms]. Then the stream ends
+#define CAMERA_STREAM_MAX_FRAME_AGE 300                     ///< capture a new frame when the latest one was not sent yet but is older than this [ms]
+#define CAMERA_STREAM_FRAME_INTERVAL 200                    ///< minimum time between stream frames, about 5 frames/s. More frames heat the chip with little benefit [ms]
+#define CAMERA_STREAM_HOT_FRAME_INTERVAL 1000               ///< minimum time between stream frames while the MCU is hot (THERMAL_STREAM_SLOW_TEMP), 1 frame/s [ms]
+#define CAMERA_STREAM_TASK_STACK    4096                    ///< stream capture task stack size [bytes]
+
+/* --------------- CAMERA SENSORS  --------------*/
+/* The camera driver detects the sensor automatically: OV2640 (max. 1600x1200), OV3660 (max. 2048x1536), OV5640 (max. 2592x1944) */
+#define CAMERA_XCLK_OV2640          15000000                ///< XCLK for the OV2640 [Hz]
+#define CAMERA_XCLK_OV3660          20000000                ///< XCLK for the OV3660 [Hz], Espressif reference value
+#define CAMERA_XCLK_OV5640          20000000                ///< XCLK for the OV5640 [Hz], Espressif reference value
+#define CAMERA_UNKNOWN_SENSOR_MAX_FRAMESIZE FRAMESIZE_UXGA  ///< maximum frame size on the WEB page when the sensor is not detected
+#define OV3660_AGC_GAIN_CEILING     64                      ///< OV3660, OV5640: maximum automatic gain, raw value, 16 = 1x, 64 = 4x
+#define CAMERA_MIN_FRAMESIZE_INDEX  4                       ///< smallest frame size index offered, 4 = 1024x768. Smaller ones are too small for Prusa Connect
+#define CAMERA_JPEG_QUALITY_MIN     10                      ///< best JPEG quality offered (lower value = better). Lower values make frames larger than the frame buffer
+#define CAMERA_JPEG_QUALITY_MAX     63                      ///< lowest JPEG quality. The WEB page slider sends 73 - quality
+#define CAMERA_SENSOR_UNKNOWN       0                       ///< saved sensor code: not detected yet
+#define CAMERA_SENSOR_OV2640        1                       ///< saved sensor code: OV2640
+#define CAMERA_SENSOR_OV3660        2                       ///< saved sensor code: OV3660
+#define CAMERA_SENSOR_OV5640        3                       ///< saved sensor code: OV5640
 
 /* ------------ PRUSA BACKEND CFG  --------------*/
-#define HOST_URL_CAM_PATH           "/c/snapshot"           ///< path for sending photo to prusa connect
-#define HOST_URL_INFO_PATH          "/c/info"               ///< path for sending info to prusa connect
-#define REFRESH_INTERVAL_MIN        10                      ///< minimum refresh interval for sending photo to prusa connect [s]
-#define REFRESH_INTERVAL_MAX        240                     ///< maximum refresh interval for sending photo to prusa connect [s]
+/* Prusa Camera Service API: https://camera-service.prusa3d.com/docs/ */
+#define HOST_URL_CAM_PATH           "/v1/snapshot"          ///< path for sending photo to the Camera Service
+#define HOST_URL_INFO_PATH          "/v1/camera-info"       ///< path for sending camera info to the Camera Service
+#define LEGACY_PRUSA_CONNECT_HOSTNAME "connect.prusa3d.com" ///< old hostname of the camera API, migrated to FACTORY_CFG_HOSTNAME
+#define BACKEND_USER_AGENT          "PrusaESP32Cam/" SW_VERSION ///< User-Agent header, required by the Camera Service
+#define REFRESH_INTERVAL_TEN_SEC    10                      ///< trigger scheme TEN_SEC [s]
+#define REFRESH_INTERVAL_THIRTY_SEC 30                      ///< trigger scheme THIRTY_SEC [s]
+#define REFRESH_INTERVAL_SIXTY_SEC  60                      ///< trigger scheme SIXTY_SEC [s]
+#define REFRESH_INTERVAL_TEN_MIN    600                     ///< trigger scheme TEN_MIN [s]
+#define REFRESH_INTERVAL_TEN_MIN_EEPROM 0                   ///< value stored in the EEPROM for TEN_MIN, the EEPROM cell has 1 byte
+#define BACKEND_SOCKET_TIMEOUT      5000                    ///< socket read/write timeout [ms]
+#define TLS_HANDSHAKE_TIMEOUT       15                      ///< TLS handshake timeout [s]. Must be shorter than WDG_TIMEOUT, the library default is 120 s
+#define BACKEND_RESPONSE_TIMEOUT    10000                   ///< maximum waiting time for the backend response [ms]
+#define BACKEND_BACKOFF_MAX         600                     ///< maximum waiting time after a failed upload [s]
+#define BACKEND_KEEPALIVE_MAX_INTERVAL 90                   ///< keep the HTTPS connection open between uploads when the upload interval is at most this [s]. The server keeps an idle connection open at least 65 s (measured 2026-10)
+#define BACKEND_CONNECT_FAIL_WIFI_RECONNECT 10              ///< reconnect WiFi after this count of consecutive failed connections to the backend
+#define CAMERA_SERVICE_SNAPSHOT_MAX_SIZE 1000000            ///< maximum snapshot size [bytes]
+#define CAMERA_SERVICE_NAME_MAX_LEN 32                      ///< maximum length of the camera name
+#define CAMERA_SERVICE_FW_VERSION_MAX_LEN 16                ///< maximum length of the firmware version
+#define CAMERA_SERVICE_HW_VERSION_MAX_LEN 32                ///< maximum length of the hardware version
+#define CAMERA_SERVICE_TOKEN_LEN    20                      ///< token length
+#define CAMERA_SERVICE_FINGERPRINT_MIN_LEN 16               ///< minimum fingerprint length
+#define CAMERA_SERVICE_FINGERPRINT_MAX_LEN 64               ///< maximum fingerprint length
+
+/* ------------- THERMAL PROTECTION  ------------*/
+/* the internal sensor measures the chip, which is much hotter than the air: the stream heats it above 75 °C within seconds */
+#define THERMAL_SENSOR_RANGE_MIN    20                      ///< measuring range of the internal sensor, the driver chooses 20-100 °C (error < 2 °C) [°C]
+#define THERMAL_SENSOR_RANGE_MAX    100                     ///< measuring range of the internal sensor [°C]
+#define THERMAL_FILTER_FACTOR       0.2                     ///< weight of a new reading in the average temperature, a single noisy reading does not switch the protection
+#define THERMAL_STREAM_SLOW_TEMP    80.0                    ///< MCU temperature for a slower stream: CAMERA_STREAM_HOT_FRAME_INTERVAL [°C]
+#define THERMAL_STREAM_NORMAL_TEMP  75.0                    ///< MCU temperature for the normal stream speed again [°C]
+#define THERMAL_THROTTLE_TEMP       88.0                    ///< MCU temperature for throttling: stream is stopped, uploads are slowed down [°C]
+#define THERMAL_RESUME_TEMP         80.0                    ///< MCU temperature for normal operation after throttling [°C]
+#define THERMAL_THROTTLE_INTERVAL   REFRESH_INTERVAL_SIXTY_SEC ///< minimum upload interval during throttling [s]
+
+/* ----------------- HEALTH CHECK  --------------*/
+#define HEALTH_CHECK_INTERVAL       10                      ///< interval for checking the free memory [s]
+#define HEALTH_LOW_MEMORY_INTERNAL  (16 * 1024)             ///< minimum largest free block in the internal RAM, for WiFi and TLS [B]
+#define HEALTH_LOW_MEMORY_PSRAM     (512 * 1024)            ///< minimum largest free block in the PSRAM, for photos and stream frames [B]
+#define HEALTH_LOW_MEMORY_RESTART   300                     ///< restart after the memory is low this long, when the printer is not printing [s]
+#define HEALTH_LOW_MEMORY_FORCE     3600                    ///< restart after the memory is low this long, also while printing [s]
+
+/* ------------------ PRUSALINK  ----------------*/
+#define PRUSALINK_POLL_INTERVAL     10                      ///< interval for reading printer state from PrusaLink [s]
+#define PRUSALINK_RETRY_INTERVAL    60                      ///< interval for reading printer state when the printer does not respond [s]
+#define PRUSALINK_HTTP_TIMEOUT      3000                    ///< PrusaLink HTTP timeout [ms]
+#define PRUSALINK_IDLE_INTERVAL     REFRESH_INTERVAL_TEN_MIN ///< upload interval when the printer is not printing [s]
+#define PRUSALINK_DEFAULT_USER      "maker"                 ///< default PrusaLink user name on Prusa printers
 
 /* -------------- STATUS LED CFG ----------------*/
 #define STATUS_LED_ON_DURATION      100                     ///< time for blink status LED when is module in the ON state [ms]
@@ -40,6 +105,9 @@
 #define STATUS_LED_STA_CONNECTING   800                     ///< time for blink status LED when is module connecting to the WiFi network [ms]
 #define STATUS_LED_STA_CONNECTED    4000                    ///< time for blink status LED when is module connected to the WiFi network [ms]
 #define STATUS_LED_ERROR            100                     ///< time for blink status LED when is module in the error state [ms]
+#define STATUS_LED_MODE_ON          0                       ///< status LED mode: always blinks
+#define STATUS_LED_MODE_ERRORS      1                       ///< status LED mode: dark while connected to the Wi-Fi network, blinks in the AP mode, while connecting and on an error
+#define STATUS_LED_MODE_OFF         2                       ///< status LED mode: always dark. The factory reset still blinks it
 
 /* ------------------- TASKS --------------------*/
 #define TASK_SYSTEM                 1000                    ///< system task interval [ms]
@@ -55,14 +123,13 @@
 #define WEB_SERVER_PORT             80                      ///< WEB server port 
 #define SERIAL_PORT_SPEED           115200                  ///< baud rate 
 #define WDG_TIMEOUT                 40000                   ///< wdg timeout [second]
-#define PHOTO_FRAGMENT_SIZE         2048                    ///< photo fragmentation size [bytes]
+#define PHOTO_FRAGMENT_SIZE         16384                   ///< photo fragmentation size [bytes]. One TLS record carries max. 16 KB (CONFIG_MBEDTLS_SSL_MAX_CONTENT_LEN)
 #define LOOP_DELAY                  100                     ///< loop delay [ms]
 #define WIFI_CLIENT_WAIT_CON        false                   ///< wait for connecting to WiFi network
 #define WEB_CACHE_INTERVAL          86400                   ///< cache interval for browser [s] 86400s = 24h
-
-/* --------------- OTA UPDATE CFG  --------------*/
-#define OTA_UPDATE_API_SERVER       "api.github.com"        ///< OTA update server URL
-#define OTA_UPDATE_API_URL          F("/repos/prusa3d/Prusa-Firmware-ESP32-Cam/releases/latest")  ///< path to file with OTA update
+#define WEB_WRITE_HEADER_NAME       "X-Requested-With"      ///< header that every request changing the camera must have. A page of another site cannot add it (CORS), so it cannot change the camera (CSRF)
+#define WEB_WRITE_HEADER_VALUE      "PrusaESP32Cam"         ///< value of WEB_WRITE_HEADER_NAME, sent by scripts.js
+#define WEB_HOST_SUFFIXES           { "local", "lan", "home", "home.arpa", "localdomain", "internal", "fritz.box" } ///< accepted host names: IP address or the camera name (mDNS / DHCP), alone or with one of these suffixes. Other names are refused (DNS rebinding)
 
 /* ---------- RESET CFG CONFIGURATION  ----------*/
 #define CFG_RESET_TIME_WAIT         10000                   ///< wait to 10 000 ms = 10s for reset cfg during grounded CFG_RESET_PIN 
@@ -72,13 +139,13 @@
 #define LOGS_FILE_NAME              "SysLog.log"            ///< syslog file name
 #define LOGS_FILE_PATH              "/"                     ///< directory for log files
 #define LOGS_FILE_MAX_SIZE          1024                    ///< maximum file size in the [kb]
+#define LOGS_FLUSH_INTERVAL         5000                    ///< flush the log file to the SD card at most once per interval [ms]. Errors and warnings are flushed immediately
 #define FILE_REMOVE_MAX_COUNT       5                       ///< maximum count for remove files from sd card
 
 /* ---------------- AP MODE CFG  ----------------*/
-#define STA_AP_MODE_TIMEOUT         300000                  ///< how long is AP enable after start, when is module in the STA mode [ms]
+#define SERVICE_AP_OFF_DELAY        60000                   ///< the service AP is switched off when the camera has been connected to the Wi-Fi network this long and no device uses the service AP. Checked every TASK_WIFI [ms]
 #define SERVICE_WIFI_SSID_UID       true                    ///< enable/disable added UID to service SSID name
 #define SERVICE_WIFI_SSID           F("ESP32_camera")       ///< service WI-FI SSID name. Maximum length SERVICE_WIFI_SSID + UID = 32
-#define SERVICE_WIFI_PASS           F("12345678")           ///< service WI-FI password
 #define SERVICE_WIFI_CHANNEL        10                      ///< service WI-FI channel
 #define SERVICE_LOCAL_IP            F("192.168.0.1")        ///< service WI-FI module IP address
 #define SERVICE_LOCAL_GATEWAY       F("192.168.0.1")        ///< service WI-FI module gateway
@@ -90,6 +157,7 @@
 
 /* ----------------- WiFi CFG -------------------*/
 #define WIFI_STA_WDG_TIMEOUT        60000                   ///< STA watchdog timeout [ms]
+#define WIFI_STA_FAST_RETRY_COUNT   3                       ///< failed STA connections (network not found, rejected by the AP) with the immediate retry of the core, then one attempt every TASK_WIFI
 #define WIFI_DISABLE_UNENCRYPTED_STA_PASS_CHECK false       ///< enable/disable WEP/WPA/WPA2/... encryption for STA mode . for the wifi network without encryption set to false
 
 /* ----------------- NTP CFG --------------------*/
@@ -111,8 +179,8 @@
 
 /* ---------------- FACTORY CFG  ----------------*/
 #define FACTORY_CFG_PHOTO_REFRESH_INTERVAL    30                ///< in the second
-#define FACTORY_CFG_PHOTO_QUALITY             10                ///< 10-63, lower is better
-#define FACTORY_CFG_FRAME_SIZE                0                 ///< 0 - FRAMESIZE_QVGA, ..., 6 - FRAMESIZE_UXGA. Look function Cfg_TransformFrameSizeDataType
+#define FACTORY_CFG_PHOTO_QUALITY             12                ///< 10-63, lower is better
+#define FACTORY_CFG_FRAME_SIZE                4                 ///< 4 - FRAMESIZE_XGA, 6 - FRAMESIZE_UXGA, 10 - FRAMESIZE_5MP, at least CAMERA_MIN_FRAMESIZE_INDEX. Look at Camera::TransformFrameSizeDataType
 #define FACTORY_CFG_BRIGHTNESS                0                 ///< from -2 to 2
 #define FACTORY_CFG_CONTRAST                  0                 ///< from -2 to 2
 #define FACTORY_CFG_SATURATION                0                 ///< from -2 to 2
@@ -129,15 +197,13 @@
 #define FACTORY_CFG_WEB_AUTH_USERNAME         F("admin")        ///< user name for login to WEB interface. definition WEB_ENABLE_BASIC_AUTH must be true
 #define FACTORY_CFG_WEB_AUTH_PASSWORD         F("admin")        ///< password for login to WEB interface. definition WEB_ENABLE_BASIC_AUTH must be true
 #define FACTORY_CFG_WEB_AUTH_ENABLE           false             ///< enable web auth for login to WEB interface. definition WEB_ENABLE_BASIC_AUTH must be 
-#define FACTORY_CFG_CAMERA_FLASH_ENABLE       false             ///< enable camera flash functionality
-#define FACTORY_CFG_CAMERA_FLASH_TIME         200               ///< time for camera flash duration time [ms]
 #define FACTORY_CFG_MDNS_RECORD_HOST          F("prusa-esp32cam") ///< mdns record http://MDNS_RECORD_HOST.local
 #define FACTORY_CFG_AEC2                      0                 ///< enable automatic exposition
 #define FACTORY_CFG_AE_LEVEL                  0                 ///< automatic exposition level
 #define FACTORY_CFG_AEC_VALUE                 300               ///< automatic exposition time
 #define FACTORY_CFG_GAIN_CTRL                 1                 ///< enable automatic gain
 #define FACTORY_CFG_AGC_GAIN                  0                 ///< automatic gain controll gain
-#define FACTORY_CFG_HOSTNAME                  F("connect.prusa3d.com")  ///< hostname for Prusa Connect
+#define FACTORY_CFG_HOSTNAME                  F("camera-service.prusa3d.com")  ///< hostname for Prusa Connect Camera Service
 #define FACTORY_CFG_ENABLE_SERVICE_AP         1                 ///< enable service AP mode
 #define FACTORY_CFG_NETWORK_IP_METHOD         0                 ///< 0 - DHCP, 1 - Static IP
 #define FACTORY_CFG_NETWORK_STATIC_IP         F("255.255.255.255") ///< Static IP address
@@ -146,8 +212,15 @@
 #define FACTORY_CFG_NETWORK_STATIC_DNS        F("255.255.255.255") ///< Static DNS
 #define FACTORY_CFG_IMAGE_EXIF_ROTATION       1                 ///< Image rotation 1 - 0°, 6 - 90°, 3 - 180°, 8 - 270°
 #define FACTORY_CFG_TIMELAPS_ENABLE           0                 ///< enable timelaps functionality
-#define FACTORY_CFG_ENABLE_EXT_SENSOR         0                 ///< enable DHT22 sensor
-#define FACTORY_CFG_EXT_SENSOR_UNIT           0                 ///< 0 = celsius, 1 = fahrenheit
+#define FACTORY_CFG_PRUSALINK_ENABLE          0                 ///< read printer state from PrusaLink and upload often only during printing
+#define FACTORY_CFG_PRUSALINK_HOST            F("")             ///< PrusaLink printer IP address or hostname
+#define FACTORY_CFG_PRUSALINK_USER            F(PRUSALINK_DEFAULT_USER) ///< PrusaLink user name
+#define FACTORY_CFG_PRUSALINK_PASSWORD        F("")             ///< PrusaLink password
+#define FACTORY_CFG_STATUS_LED_MODE           STATUS_LED_MODE_ON ///< STATUS_LED_MODE_xxx
+#define FACTORY_CFG_WIFI_EAP_ENABLE           0                 ///< Wi-Fi Enterprise (PEAP), 1 = enabled
+#define FACTORY_CFG_WIFI_EAP_IDENTITY         F("")             ///< Wi-Fi Enterprise anonymous identity
+#define FACTORY_CFG_WIFI_EAP_USERNAME         F("")             ///< Wi-Fi Enterprise user name
+#define FACTORY_CFG_WIFI_EAP_PASSWORD         F("")             ///< Wi-Fi Enterprise password
 
 /* ---------------- CFG FLAGS  ------------------*/
 #define CFG_WIFI_SETTINGS_SAVED               0x0A              ///< flag saved config
@@ -214,13 +287,11 @@
 #define EEPROM_ADDR_FIRST_MCU_START_FLAG_START    (EEPROM_ADDR_BASIC_AUTH_ENABLE_FLAG_START + EEPROM_ADDR_BASIC_AUTH_ENABLE_FLAG_LENGTH)  ///< where is stored flag for first MCU start check
 #define EEPROM_ADDR_FIRST_MCU_START_FLAG_LENGTH   1                                                                                       ///< how long is flag
 
-#define EEPROM_ADDR_CAMERA_FLASH_ENABLE_START     (EEPROM_ADDR_FIRST_MCU_START_FLAG_START + EEPROM_ADDR_FIRST_MCU_START_FLAG_LENGTH)      ///< where is stored flag for enable/disable camera flash
-#define EEPROM_ADDR_CAMERA_FLASH_ENABLE_LENGTH    1                                                                                       ///< how long is flag
+/* unused: the removed LED flash (enable 1 B, time 2 B). Kept, so the settings after it stay at the same address */
+#define EEPROM_ADDR_RESERVED_FLASH_START          (EEPROM_ADDR_FIRST_MCU_START_FLAG_START + EEPROM_ADDR_FIRST_MCU_START_FLAG_LENGTH)
+#define EEPROM_ADDR_RESERVED_FLASH_LENGTH         3
 
-#define EEPROM_ADDR_CAMERA_FLASH_TIME_START       (EEPROM_ADDR_CAMERA_FLASH_ENABLE_START + EEPROM_ADDR_CAMERA_FLASH_ENABLE_LENGTH)        ///< where is stored value camera flash during time
-#define EEPROM_ADDR_CAMERA_FLASH_TIME_LENGTH      2                                                                                       ///< how long is the value
-
-#define EEPROM_ADDR_MDNS_RECORD_START             (EEPROM_ADDR_CAMERA_FLASH_TIME_START + EEPROM_ADDR_CAMERA_FLASH_TIME_LENGTH)
+#define EEPROM_ADDR_MDNS_RECORD_START             (EEPROM_ADDR_RESERVED_FLASH_START + EEPROM_ADDR_RESERVED_FLASH_LENGTH)
 #define EEPROM_ADDR_MDNS_RECORD_LENGTH            41
 
 #define EEPROM_ADDR_AWB_ENABLE_START              (EEPROM_ADDR_MDNS_RECORD_START + EEPROM_ADDR_MDNS_RECORD_LENGTH)
@@ -286,11 +357,42 @@
 #define EEPROM_ADDR_TIMELAPS_ENABLE_START         (EEPROM_ADDR_IMAGE_ROTATION_START + EEPROM_ADDR_IMAGE_ROTATION_LENGTH)
 #define EEPROM_ADDR_TIMELAPS_ENABLE_LENGTH        1
 
-#define EEPROM_ADDR_EXT_SENS_ENABLE_START         (EEPROM_ADDR_TIMELAPS_ENABLE_START + EEPROM_ADDR_TIMELAPS_ENABLE_LENGTH)
-#define EEPROM_ADDR_EXT_SENS_ENABLE_LENGTH        1
+/* unused: the removed external temperature sensor. Kept, so the settings after it stay at the same address */
+#define EEPROM_ADDR_RESERVED_START                (EEPROM_ADDR_TIMELAPS_ENABLE_START + EEPROM_ADDR_TIMELAPS_ENABLE_LENGTH)
+#define EEPROM_ADDR_RESERVED_LENGTH               2
 
-#define EEPROM_ADDR_EXT_SENS_UNIT_START           (EEPROM_ADDR_EXT_SENS_ENABLE_START + EEPROM_ADDR_EXT_SENS_ENABLE_LENGTH)
-#define EEPROM_ADDR_EXT_SENS_UNIT_LENGTH          1
+#define EEPROM_ADDR_PRUSALINK_ENABLE_START        (EEPROM_ADDR_RESERVED_START + EEPROM_ADDR_RESERVED_LENGTH)
+#define EEPROM_ADDR_PRUSALINK_ENABLE_LENGTH       1
+
+#define EEPROM_ADDR_PRUSALINK_HOST_START          (EEPROM_ADDR_PRUSALINK_ENABLE_START + EEPROM_ADDR_PRUSALINK_ENABLE_LENGTH)
+#define EEPROM_ADDR_PRUSALINK_HOST_LENGTH         41                                                                                      ///< maximum length 40 + 1 byte for save length
+
+#define EEPROM_ADDR_PRUSALINK_USER_START          (EEPROM_ADDR_PRUSALINK_HOST_START + EEPROM_ADDR_PRUSALINK_HOST_LENGTH)
+#define EEPROM_ADDR_PRUSALINK_USER_LENGTH         21                                                                                      ///< maximum length 20 + 1 byte for save length
+
+#define EEPROM_ADDR_PRUSALINK_PASSWORD_START      (EEPROM_ADDR_PRUSALINK_USER_START + EEPROM_ADDR_PRUSALINK_USER_LENGTH)
+#define EEPROM_ADDR_PRUSALINK_PASSWORD_LENGTH     33                                                                                      ///< maximum length 32 + 1 byte for save length
+
+#define EEPROM_ADDR_CAMERA_SENSOR_START           (EEPROM_ADDR_PRUSALINK_PASSWORD_START + EEPROM_ADDR_PRUSALINK_PASSWORD_LENGTH)
+#define EEPROM_ADDR_CAMERA_SENSOR_LENGTH          1                                                                                       ///< detected camera sensor, CAMERA_SENSOR_xxx
+
+#define EEPROM_ADDR_UNPLANNED_RESTARTS_START      (EEPROM_ADDR_CAMERA_SENSOR_START + EEPROM_ADDR_CAMERA_SENSOR_LENGTH)
+#define EEPROM_ADDR_UNPLANNED_RESTARTS_LENGTH     2                                                                                       ///< count of unplanned restarts
+
+#define EEPROM_ADDR_STATUS_LED_MODE_START         (EEPROM_ADDR_UNPLANNED_RESTARTS_START + EEPROM_ADDR_UNPLANNED_RESTARTS_LENGTH)
+#define EEPROM_ADDR_STATUS_LED_MODE_LENGTH        1                                                                                       ///< status LED mode, STATUS_LED_MODE_xxx
+
+#define EEPROM_ADDR_WIFI_EAP_ENABLE_START         (EEPROM_ADDR_STATUS_LED_MODE_START + EEPROM_ADDR_STATUS_LED_MODE_LENGTH)
+#define EEPROM_ADDR_WIFI_EAP_ENABLE_LENGTH        1                                                                                       ///< Wi-Fi Enterprise, only 1 = enabled (a new byte after an update is 0 or 255)
+
+#define EEPROM_ADDR_WIFI_EAP_IDENTITY_START       (EEPROM_ADDR_WIFI_EAP_ENABLE_START + EEPROM_ADDR_WIFI_EAP_ENABLE_LENGTH)
+#define EEPROM_ADDR_WIFI_EAP_IDENTITY_LENGTH      65                                                                                      ///< Wi-Fi Enterprise anonymous identity, 64 + 1 for the length
+
+#define EEPROM_ADDR_WIFI_EAP_USERNAME_START       (EEPROM_ADDR_WIFI_EAP_IDENTITY_START + EEPROM_ADDR_WIFI_EAP_IDENTITY_LENGTH)
+#define EEPROM_ADDR_WIFI_EAP_USERNAME_LENGTH      65                                                                                      ///< Wi-Fi Enterprise user name, 64 + 1 for the length
+
+#define EEPROM_ADDR_WIFI_EAP_PASSWORD_START       (EEPROM_ADDR_WIFI_EAP_USERNAME_START + EEPROM_ADDR_WIFI_EAP_USERNAME_LENGTH)
+#define EEPROM_ADDR_WIFI_EAP_PASSWORD_LENGTH      65                                                                                      ///< Wi-Fi Enterprise password, 64 + 1 for the length
 
 #define EEPROM_SIZE (EEPROM_ADDR_REFRESH_INTERVAL_LENGTH + EEPROM_ADDR_FINGERPRINT_LENGTH + EEPROM_ADDR_TOKEN_LENGTH + \
                      EEPROM_ADDR_FRAMESIZE_LENGTH + EEPROM_ADDR_BRIGHTNESS_LENGTH + EEPROM_ADDR_CONTRAST_LENGTH + \
@@ -299,7 +401,7 @@
                      EEPROM_ADDR_PHOTO_QUALITY_LENGTH + EEPROM_ADDR_WIFI_SSID_LENGTH + EEPROM_ADDR_WIFI_PASSWORD_LENGTH + \
                      EEPROM_ADDR_WIFI_ACTIVE_FLAG_LENGTH + EEPROM_ADDR_BASIC_AUTH_USERNAME_LENGTH + EEPROM_ADDR_BASIC_AUTH_PASSWORD_LENGTH + \
                      EEPROM_ADDR_BASIC_AUTH_ENABLE_FLAG_LENGTH + EEPROM_ADDR_FIRST_MCU_START_FLAG_LENGTH + \
-                     EEPROM_ADDR_CAMERA_FLASH_ENABLE_LENGTH + EEPROM_ADDR_CAMERA_FLASH_TIME_LENGTH + \
+                     EEPROM_ADDR_RESERVED_FLASH_LENGTH + \
                      EEPROM_ADDR_MDNS_RECORD_LENGTH + EEPROM_ADDR_AWB_ENABLE_LENGTH + EEPROM_ADDR_AWB_GAIN_ENABLE_LENGTH + \
                      EEPROM_ADDR_AWB_MODE_ENABLE_LENGTH + EEPROM_ADDR_BPC_ENABLE_LENGTH + EEPROM_ADDR_WPC_ENABLE_LENGTH + \
                      EEPROM_ADDR_RAW_GAMA_ENABLE_LENGTH + EEPROM_ADDR_AEC2_LENGTH + EEPROM_ADDR_AE_LEVEL_LENGTH + \
@@ -307,7 +409,12 @@
                      EEPROM_ADDR_HOSTNAME_LENGTH + EEPROM_ADDR_SERVICE_AP_ENABLE_LENGTH + EEPROM_ADDR_NETWORK_IP_METHOD_LENGTH +\
                      EEPROM_ADDR_NETWORK_STATIC_IP_LENGTH + EEPROM_ADDR_NETWORK_STATIC_MASK_LENGTH + EEPROM_ADDR_NETWORK_STATIC_GATEWAY_LENGTH + \
                      EEPROM_ADDR_NETWORK_STATIC_DNS_LENGTH + EEPROM_ADDR_IMAGE_ROTATION_LENGTH + EEPROM_ADDR_TIMELAPS_ENABLE_LENGTH + \
-                     EEPROM_ADDR_EXT_SENS_ENABLE_LENGTH + EEPROM_ADDR_EXT_SENS_UNIT_LENGTH)    ///< how many bits do we need for eeprom memory
+                     EEPROM_ADDR_RESERVED_LENGTH + \
+                     EEPROM_ADDR_PRUSALINK_ENABLE_LENGTH + EEPROM_ADDR_PRUSALINK_HOST_LENGTH + EEPROM_ADDR_PRUSALINK_USER_LENGTH + \
+                     EEPROM_ADDR_PRUSALINK_PASSWORD_LENGTH + EEPROM_ADDR_CAMERA_SENSOR_LENGTH + \
+                     EEPROM_ADDR_UNPLANNED_RESTARTS_LENGTH + EEPROM_ADDR_STATUS_LED_MODE_LENGTH + \
+                     EEPROM_ADDR_WIFI_EAP_ENABLE_LENGTH + EEPROM_ADDR_WIFI_EAP_IDENTITY_LENGTH + EEPROM_ADDR_WIFI_EAP_USERNAME_LENGTH + \
+                     EEPROM_ADDR_WIFI_EAP_PASSWORD_LENGTH)    ///< how many bits do we need for eeprom memory
 
 #endif
 

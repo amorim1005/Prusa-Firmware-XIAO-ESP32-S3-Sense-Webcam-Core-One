@@ -75,13 +75,13 @@ String lastTwoChars = command.substring(command.length() - 2);
   if (command.startsWith("setwifissid:") && command.endsWith(";")) {
     /* remove prefix "setwifissid:" and end of command symbol ";" */
     wifi_ssid = command.substring(12, command.length() -1);
-    log->AddEvent(LogLevel_Info, F("--> Console set WiFi SSID: "), wifi_ssid);
+    log->AddEvent(LogLevel_Info, F("--> Console set Wi-Fi SSID: "), wifi_ssid);
     wifim->SetStaSsid(wifi_ssid);
 
   } else if (command.startsWith("setwifipass:") && command.endsWith(";")) {
     /* remove prefix "setwifipass:" and end of command symbol ";" */
     wifi_pass = command.substring(12, command.length() -1);
-    log->AddEvent(LogLevel_Info, F("--> Console set WiFi password: "), wifi_pass);
+    log->AddEvent(LogLevel_Info, F("--> Console set Wi-Fi password: "), wifi_pass);
     wifim->SetStaPassword(wifi_pass);
   
   } else if (command.startsWith("setauthtoken:") && command.endsWith(";")) {
@@ -91,11 +91,11 @@ String lastTwoChars = command.substring(command.length() - 2);
     connect->SetToken(auth_token);
 
   } else if (command.startsWith("wificonnect") && command.endsWith(";")) {
-    log->AddEvent(LogLevel_Info, F("--> Console connecting to wifi..."));
+    log->AddEvent(LogLevel_Info, F("--> Console connecting to Wi-Fi..."));
     wifim->ConnectToSta();
 
   } else if (command.startsWith("getwifimode") && command.endsWith(";")) {
-    log->AddEvent(LogLevel_Info, F("--> Console print WiFi mode..."));
+    log->AddEvent(LogLevel_Info, F("--> Console print Wi-Fi mode..."));
     Serial.print("wifimode:" + wifim->GetWiFiMode() + ";");
 
   } else if (command.startsWith("getwifistastatus") && command.endsWith(";")) {
@@ -107,39 +107,23 @@ String lastTwoChars = command.substring(command.length() - 2);
     Serial.print("wifistaip:" + wifim->GetStaIp() + ";");
 
   } else if (command.startsWith("getserviceapssid") && command.endsWith(";")) {
-    log->AddEvent(LogLevel_Info, F("--> Console print service WiFi AP SSID..."));
+    log->AddEvent(LogLevel_Info, F("--> Console print service Wi-Fi AP SSID..."));
     Serial.print("getserviceapssid:" + wifim->GetServiceApSsid() + ";");
   
-  } else if (command.startsWith("otaupdate") && command.endsWith(";")) {
-    log->AddEvent(LogLevel_Warning, F("--> Start OTA update process!"));
-    FirmwareUpdate.StartOtaUpdate = true;
-
   } else if (command.startsWith("resolution:") && command.endsWith(";")) {
     uint8_t resolution = command.substring(11, command.length() -1).toInt();
     log->AddEvent(LogLevel_Info, F("--> Console set photo resolution: "), String(resolution));
-    if ((resolution >= 0) && (resolution <= 6)) {
-      cam->SetFrameSize(resolution);
-    } else {
+    /* SetFrameSize checks the index against the offered frame sizes and the sensor maximum */
+    if (false == cam->SetFrameSize(resolution)) {
       log->AddEvent(LogLevel_Warning, F("--> Bad resolution size!"));
     }
   } else if (command.startsWith("photoquality:") && command.endsWith(";")) {
-    uint8_t quality = command.substring(13, command.length() -1).toInt();
+    long quality = command.substring(13, command.length() -1).toInt();
     log->AddEvent(LogLevel_Info, F("--> Console set photo quality: "), String(quality));
-    if ((quality >= 10) && (quality <= 63)) {
-      cam->SetPhotoQuality(quality);
-    } else {
+    /* SetPhotoQuality checks the range, a long value must not wrap into it */
+    if ((quality < 0) || (quality > 255) || (false == cam->SetPhotoQuality(quality))) {
       log->AddEvent(LogLevel_Warning, F("--> Bad photo quality!"));
     }
-
-  } else if (command.startsWith("setflash") && command.endsWith(";")) {
-    cam->SetCameraFlashEnable(!cam->GetCameraFlashEnable());
-    cam->SetFlashStatus(false);
-    log->AddEvent(LogLevel_Warning, "--> Console set FLASH: " + String(cam->GetCameraFlashEnable()));
-    
-  } else if (command.startsWith("setlight") && command.endsWith(";")) {
-    cam->SetCameraFlashEnable(false);
-    cam->SetFlashStatus(!cam->GetFlashStatus());
-    log->AddEvent(LogLevel_Warning, "--> Console set LIGHT: " + String(cam->GetFlashStatus()));
 
   } else if (command.startsWith("loglevel:") && command.endsWith(";")) {
     uint8_t level = command.substring(9, command.length() -1).toInt();
@@ -181,19 +165,16 @@ void SerialCfg::PrintAvailableCommands() {
   Serial.println(F("getwifistastatus;       - get STA status (connected/disconnected)"));
   Serial.println(F("getwifistaip;           - get STA IP address"));
   Serial.println(F("getserviceapssid;       - get service WiFi AP SSID"));
-  Serial.println(F("otaupdate;              - start OTA update process"));
   Serial.println(F("resolution:INDEX;       - set photo resolution"));
   Serial.println(F(" |   Index - Resolution"));
-  Serial.println(F(" |->   0   - 320x240"));
-  Serial.println(F(" |->   1   - 352x288"));
-  Serial.println(F(" |->   2   - 640x480"));
-  Serial.println(F(" |->   3   - 800x600"));
   Serial.println(F(" |->   4   - 1024x768"));
   Serial.println(F(" |->   5   - 1280x1024"));
   Serial.println(F(" |->   6   - 1600x1200"));
+  Serial.println(F(" |->   7   - 1280x720"));
+  Serial.println(F(" |->   8   - 1920x1080"));
+  Serial.println(F(" |->   9   - 2048x1536 (OV3660, OV5640)"));
+  Serial.println(F(" |->  10   - 2592x1944 (OV5640)"));
   Serial.println(F("photoquality:QUALITY;   - set photo quality. 10-63 lower number means higher quality "));
-  Serial.println(F("setflash;               - enable/disable LED flash"));
-  Serial.println(F("setlight;               - enable/disable LED light"));
   Serial.println(F("loglevel:LEVEL;         - set log level. 0=Error, 1=Warning, 2=Info, 3=Verbose"));
   Serial.println(F("mcureboot;              - reboot MCU"));
   Serial.println(F("commandslist;           - print available commands"));

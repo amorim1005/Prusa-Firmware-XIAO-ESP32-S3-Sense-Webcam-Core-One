@@ -18,32 +18,18 @@
 #define MSG_SAVE_OK_WIFI      "Save OK. Connecting to Wi-Fi. Please wait several second"
 #define MSG_SAVE_OK           "Save cfg OK"                           ///< WEB app msg save OK
 #define MSG_SAVE_NOTOK        "Save cfg NOT OK!"                      ///< WEB app msg save NOT OK
+#define MSG_WIFI_EAP_NOT_CFG  "ERROR: Wi-Fi Enterprise not switched on. Fill in the network name, user name and password, and press Save & Connect"
 #define MSG_SCANNING          "Scanning Wi-Fi networks. Wait 8s..."   ///< WEB app msg Scanning wifi
-#define MSG_UPDATE_START      "Start updating"
 
 /* ------------------------------------------------------------------------------------------------------------ */
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE HTML><html lang="en">
 <head>
+	<meta charset="utf-8">
 	<meta name="Prusa ESP32-cam" content="width=device-width, initial-scale=1">
 	<link rel="icon" href="/favicon.svg" type="image/svg+xml">
 
-	<link rel="stylesheet" type="text/css" href="styles.css?v=1.0.0">
-	<script src="/jquery-3.7.0.min.js"></script>
-	<script>
-		$(document).ready(function () {
-			$("a").click(function (e) {
-				e.preventDefault();
-				var page = $(this).attr("href");
-				$("#content").load(page);
-				setActive(this);
-			});
-			$("#content").load("page_config.html", function() {
-				var defaultLink = document.querySelector('a[href="page_config.html"]');
-				setActive(defaultLink);
-			});
-		});
-	</script>
+	<link rel="stylesheet" type="text/css" href="styles.css?v=1.1.2-c1">
 </head>
 <body>
     <nav>
@@ -53,7 +39,6 @@ const char index_html[] PROGMEM = R"rawliteral(
 		<li><a class=p5 href="https://help.prusa3d.com/guide/esp-camera-for-prusa-connect_390199" id="forum-link">Help</a></li>
       </ul>
       <ul class="top_bar" style="justify-content:flex-end;">
-		<li><a class=p4 href="#" onclick="javascript:actionButton('/action_led',true,'')"><div id="light-icon"></div> Light </a></li>
 		<li><a class=p4 href="#" onclick="location.reload();"><svg height="25" width="25"><image href="refresh-icon.svg"></svg> Refresh </a></li>
 		<li><a class=p4 href="#" onclick="javascript:actionButton('/action_reboot',false,'Reboot process started, wait several seconds for mcu to boot up. You can close this window now.')"><svg height="25" width="25"><image href="reboot-icon.svg"></svg> Reboot </a></li>
       </ul>
@@ -62,16 +47,16 @@ const char index_html[] PROGMEM = R"rawliteral(
 	<section class="container">
 		<div  class="container_left-half">
 			<article>
-				<img src="saved-photo.jpg" id="photo"  width="60%" onclick="openImage()"/>
+				<img src="saved-photo.jpg" id="photo"  width="60%" onclick="openImage()" onload="photoLoaded()"/>
 			</article>
 		</div>
 		<div class="container_right-half">
 			<article>
-				<p class="p1">Trigger interval: <b><span id="refreshInterval"></span><b>s</p><br><br>
+				<p class="p1">Upload interval: <b><span id="refreshInterval"></span></b> s</p><br><br>
 				<button class="btn" onclick="actionButton('/action_capture',true,'')">Refresh Snapshot</button> <br><br>
 				<button class="btn" onclick="actionButton('/action_send',false,'Sending snapshot...')">Send snapshot</button><br><br><br>
 				<button class="btn" onclick="window.open('saved-photo.jpg')">Download snapshot</button><br><br>
-				<button class="btn" onclick="window.open('stream.mjpg')">Start stream</button><br><br>
+				<button class="btn" onclick="window.open('stream.html')">Start stream</button><br><br>
 			</article>
 		</div>
 	</section>
@@ -83,7 +68,6 @@ const char index_html[] PROGMEM = R"rawliteral(
 				<li><a href="page_wifi.html">Wi-Fi</a></li>
 				<li><a href="page_auth.html">Authentication</a></li>
 				<li><a href="page_system.html">System</a></li>
-				<li><a href="page_temperature.html">Temperature</a></li>
 				</div>
 			</div>
 		</div>
@@ -93,13 +77,48 @@ const char index_html[] PROGMEM = R"rawliteral(
 	<br><br><br><br>
 	<table id=botton><tr>
 		<td><p class=p2>Prusa Connect ESP32 cam</p> </td>
-		<td><p class=p3>Author</p> <p class=p2>Miroslav Pivovarsky</p> </td>
-		<td><a href="license.html" class=p3>Licence</a> | <a href="gtac.html" class=p3>General Terms and Conditions</a> | <a href="privacypolicy.html" class=p3>Privacy Policy</a> | <a href="cookie.html" class=p3>Cookie Preferences</a> </td>
-		<td><a href="https://github.com/Prusa-Development/Prusa-Firmware-ESP32-Cam/" id="github-link"><svg height="25"><image href="github-icon.svg"></svg></a></td>
+		<td><p class=p3>Author</p> <a href="https://github.com/johnyHV" class="p2" id="original-author-link" target="_blank" rel="noopener">Miroslav Pivovarsky</a> <p class=p3>and modified by</p> <a href="https://github.com/amorim1005" class="p2" id="author-link" target="_blank" rel="noopener">amorim1005</a> </td>
+		<td><a href="license.html" class="p3 page-link">Licence</a></td>
+		<td><a href="https://github.com/amorim1005/Prusa-Firmware-XIAO-ESP32-S3-Sense-Webcam-Core-One" id="github-link"><svg height="25"><image href="github-icon.svg"></svg></a></td>
 	</tr></table>
 </body>
-	<script src="scripts.js"></script>
+	<script src="scripts.js?v=1.1.2-c1"></script>
 	<script>
+		/* load a page into #content and run its scripts in order, like the old jQuery load() */
+		function loadPage(page) {
+			getText(page, 10000).then(function(html) {
+				var content = document.getElementById('content');
+				content.innerHTML = html;
+				var scripts = Array.from(content.querySelectorAll('script'));
+				(function run(i) {
+					if (i >= scripts.length) {
+						return;
+					}
+					var old = scripts[i];
+					var script = document.createElement('script');
+					if (old.src) {
+						script.src = old.src;
+						script.onload = script.onerror = function() { run(i + 1); };
+						old.replaceWith(script);
+					} else {
+						script.textContent = old.textContent;
+						old.replaceWith(script);
+						run(i + 1);
+					}
+				})(0);
+			});
+		}
+
+		document.querySelectorAll('#links a, a.page-link').forEach(function(link) {
+			link.addEventListener('click', function(e) {
+				e.preventDefault();
+				loadPage(link.getAttribute('href'));
+				setActive(link);
+			});
+		});
+
+		loadPage("page_config.html");
+		setActive(document.querySelector('a[href="page_config.html"]'));
 		sliderCheck();
 		get_data();
 		addClickListener('github-link');
@@ -110,21 +129,20 @@ const char index_html[] PROGMEM = R"rawliteral(
 
 /* ------------------------------------------------------------------------------------------------------------ */
 const char page_auth_html[] PROGMEM = R"rawliteral(
-<style>@import url("styles.css?v=1.0.0");</style>
-<script src="jquery-3.7.0.min.js"></script>
+<style>@import url("styles.css?v=1.1.2-c1");</style>
 <body>
 	<center>
 		<table>
 			<tr><td class=pa3>Set web authentication</td><td></td></tr>
 			<tr><td class=pa1 align="right">WEB authentication </td><td><label class="switch"><input type="checkbox" name="basicauth_enable" id="authid" onchange="changeValue(this.checked, 'basicauth_cfg?basicauth_enable=', 'auth')"><span class="checkbox_slider round"></span></label></label> <span class=pa1 id="status_auth"></span></td></tr>
 			<tr><td class=pa1 align="right">Username </td><td><input type="text" name="auth_username" id="auth_username"></td></tr>
-			<tr><td class=pa1 align="right">Password </td><td><input type="password" name="auth_password" id="auth_password"><span class="toggle-password" onclick="togglePasswordVisibility()"><img id="eye-icon" src="eye.svg" alt="Show Password"></span></td></tr>
-			<tr><td class=pa1 align="right">Confirm Password </td><td><input type="password" name="auth_password_confirm" id="auth_password_confirm"><span class="toggle-password" onclick="togglePasswordVisibility()"><img id="eye-icon-confirm" src="eye.svg" alt="Show Password"></span><span id="pass_match"></span></td></tr>
+			<tr><td class=pa1 align="right">Password </td><td><input type="password" name="auth_password" id="auth_password" placeholder="unchanged"><span class="toggle-password" onclick="togglePasswordVisibility()"><img id="eye-icon" src="eye.svg" alt="Show Password"></span></td></tr>
+			<tr><td class=pa1 align="right">Confirm Password </td><td><input type="password" name="auth_password_confirm" id="auth_password_confirm" placeholder="unchanged"><span class="toggle-password" onclick="togglePasswordVisibility()"><img id="eye-icon-confirm" src="eye.svg" alt="Show Password"></span><span id="pass_match"></span></td></tr>
 			<tr><td></td><td><button class="btn_save_a" onclick="setAuth( document.getElementById('auth_username').value, document.getElementById('auth_password').value)">Save</button></td></tr>
 		</table>
 	</center>
 </body>
-<script src="scripts.js"></script>
+<script src="scripts.js?v=1.1.2-c1"></script>
 <script>
 	get_data("auth");
 	document.getElementById("auth_password").addEventListener("input", validatePasswords);
@@ -135,8 +153,7 @@ const char page_auth_html[] PROGMEM = R"rawliteral(
 
 /* ------------------------------------------------------------------------------------------------------------ */
 const char page_wifi_html[] PROGMEM = R"rawliteral(
-<style>@import url("styles.css?v=1.0.0");</style>
-<script src="jquery-3.7.0.min.js"></script>
+<style>@import url("styles.css?v=1.1.2-c1");</style>
 <body>
 	<table id="center_tb">
 		<tr><td></td><td style="width:40%">
@@ -202,10 +219,19 @@ const char page_wifi_html[] PROGMEM = R"rawliteral(
 			<tr><td class="w2" align="right">Default gateway</td><td><input type="text" name="net_gw" id=net_gw_id></td></tr>
 			<tr><td class="w2" align="right">DNS server</td><td><input type="text" name="net_dns" id=net_dns_id></td></tr>
 			<tr><td></td><td align="center"><button class="btn_save_w" onclick="setWifiNet(document.getElementById('net_ip_id').value, document.getElementById('net_mask_id').value, document.getElementById('net_gw_id').value, document.getElementById('net_dns_id').value)">Save</button></td></tr>
+			<tr><td style="height: 10px;"></td></tr>
+			<tr><td class="w1">Wi-Fi Enterprise (company or school network)</td></tr>
+			<tr><td class="w2" align="right">Wi-Fi network name (SSID)</td><td><input type="text" name="wpa2_eap_ssid" id=wpa2_eap_ssid_id></td></tr>
+			<tr><td class="w2" align="right">Anonymous identity (optional)</td><td><input type="text" name="wpa2_eap_identity" id=wpa2_eap_identity_id></td></tr>
+			<tr><td class="w2" align="right">User name</td><td><input type="text" name="wpa2_eap_user" id=wpa2_eap_user_id></td></tr>
+			<tr><td class="w2" align="right">Password</td><td><input type="password" name="wpa2_eap_pass" id=wpa2_eap_pass_id placeholder="unchanged"></td></tr>
+			<tr><td></td><td align="center"><button class="btn_save_w" onclick="setWPA2EAP(document.getElementById('wpa2_eap_ssid_id').value, document.getElementById('wpa2_eap_identity_id').value, document.getElementById('wpa2_eap_user_id').value, document.getElementById('wpa2_eap_pass_id').value)">Save & Connect</button></td></tr>
+			<tr><td class="w2" align="right">Use Wi-Fi Enterprise </td><td><label class="switch"><input type="checkbox" name="wpa2_eap_enable" id="wpa2_eapid" onchange="changeValue(this.checked, 'set_bool?wpa2_eap_enable=', 'wifi')"><span class="checkbox_slider round"></span></label> <span class="w1" id="status_wpa2_eap"></span></td></tr>
+			<tr><td></td><td class="w2">WPA2/WPA3-Enterprise with PEAP. Save & Connect switches it on. The server certificate is not checked. Saving a normal Wi-Fi network above, or switching this off, goes back to the normal Wi-Fi password.</td></tr>
 		</table>
 	</div>
 </body>
-<script src="scripts.js"></script>
+<script src="scripts.js?v=1.1.2-c1"></script>
 <script>
 	setTimeout(function(){GetDataAndPrintTableWiFi();}, 500);
 	get_data("wifi");
@@ -215,29 +241,41 @@ const char page_wifi_html[] PROGMEM = R"rawliteral(
 
 /* ------------------------------------------------------------------------------------------------------------ */
 const char page_config_html[] PROGMEM = R"rawliteral(
-<style>@import url("styles.css?v=1.0.0");</style>
-<script src="jquery-3.7.0.min.js"></script>
+<style>@import url("styles.css?v=1.1.2-c1");</style>
 <body>
 	<center><table id="data">
 		<tr><td class="ps3">Basic settings</td><td></td></tr>
-        <tr><td class="pc1">Connect Token</td><td ><input type="text" name="token" id=tokenid >&nbsp;<button class="btn_save" onclick="changeValue(encodeURIComponent(document.getElementById('tokenid').value), 'set_token?token=', 'config')">Save</button></td></tr>
+        <tr><td class="pc1">Connect Token</td><td ><input type="text" name="token" id=tokenid >&nbsp;<button class="btn_save" onclick="saveToken()">Save</button></td></tr>
         <tr><td class="pc1">Fingerprint</td><td class=pc2 id="fingerprint"></td></tr>
-		<tr><td class="pc1">Trigger Interval [s]</td><td ><input type="text" name="refresh" id=refreshid >&nbsp;<button class="btn_save" onclick="changeValue(document.getElementById('refreshid').value, 'set_int?refresh=', 'config')">Save</button></td></tr>
+		<tr>
+			<td class="pc1">Trigger Interval</td><td><label for="refresh"></label>
+				<select class="select" id="refreshid" name="refresh" onchange="changeValue(this.value, 'set_int?refresh=', 'config')">
+					<option value="10">10 s</option>
+					<option value="30">30 s</option>
+					<option value="60">60 s</option>
+					<option value="600">10 min</option>
+				</select>
+			</td>
+		</tr>
 		<tr><td style="height: 1px;"></td><td style="height: 1px;"></td></tr>
 		<tr><td class="pc1">Image quality</td><td class="pc2">Low <input type="range" class="slider" name="photo_quality" id=photo_qualityid min="10" max="63" step="1" onchange="changeValue(this.value, 'set_int?photo_quality=', 'config')"> High</td></tr>
+		<tr><td class="pc1">Camera sensor</td><td class="pc2"><span id="camera_detected"></span> (detected automatically)</td></tr>
+		<tr><td class="pc1">Autofocus</td><td class="pc2"><span id="camera_autofocus"></span></td></tr>
 		<tr>
 			<td class="pc1">Resolution</td><td><label for="framesize"></label>
 				<select class="select" id="framesizeid" name="framesize" onchange="changeValue(this.value, 'set_int?framesize=', 'config')">
-					<option value="0">320x240</option>
-					<option value="1">352x288</option>
-					<option value="2">640x480</option>
-					<option value="3">800x600</option>
 					<option value="4">1024x768</option>
+					<option value="7">1280x720 (16:9)</option>
 					<option value="5">1280x1024</option>
 					<option value="6">1600x1200</option>
+					<option value="8">1920x1080 (16:9)</option>
+					<option value="9">2048x1536</option>
+					<option value="10">2592x1944</option>
 				</select> <span class="pc1">pixels</span>
 			</td>
 		</tr>
+		<tr><td class="pc1">Estimated photo size</td><td class="pc2"><span id="photo_size_estimate"></span></td></tr>
+		<tr><td></td><td class="pc2"><span id="photo_size_warning" style="display: block; max-width: 420px; line-height: 16px;"></span></td></tr>
 		<tr><td style="height: 1px;"></td><td style="height: 1px;"></td></tr>
 		<tr><td class="pc1">Brightness</td><td class="pc2">Low <input type="range" class="slider" name="brightness" id=brightnessid min="-2" max="2" step="1" onchange="changeValue(this.value, 'set_int?brightness=', 'config')">High</td></tr>
 		<tr><td class="pc1">Contrast</td><td class="pc2">Low <input type="range" class="slider" name="contrast" id=contrastid min="-2" max="2" step="1" onchange="changeValue(this.value, 'set_int?contrast=', 'config')"> High</td></tr>
@@ -256,10 +294,14 @@ const char page_config_html[] PROGMEM = R"rawliteral(
 		<tr><td class="pc1">Horizontal mirror</td><td class="pc2"><label class="switch"><input type="checkbox" name="hmirror" id=hmirrorid  onchange="changeValue(this.checked, 'set_bool?hmirror=', 'config')"><span class="checkbox_slider round"></span></label> <span id="status_hmirror"></span></td></tr>
 		<tr><td class="pc1">Vertical flip</td><td class="pc2"><label class="switch"><input type="checkbox" name="vflip" id=vflipid onchange="changeValue(this.checked, 'set_bool?vflip=', 'config')"><span class="checkbox_slider round"></span></label> <span id="status_vflip"></span></td></tr>
 		<tr><td style="height: 1px;"></td><td style="height: 1px;"></td></tr>
-		<tr><td class="pc1">LED light</td><td class="pc2"><label class="switch"><input type="checkbox" name="led" id=ledid onchange="changeValue(this.checked, 'action_led?/led=', 'config')"><span class="checkbox_slider round"></span></label> <span id="status_led"></span></td></tr>
-		<tr><td class="pc1">LED flash</td><td class="pc2"><label class="switch"><input type="checkbox" name="flash" id=flashid onchange="changeValue(this.checked, 'set_bool?flash=', 'config')"><span class="checkbox_slider round"></span></label> <span id="status_flash"></span></td></tr>
-		<tr><td class="pc1">Flash duration</td><td class="pc2">Low <input type="range" class="slider" name="flash_time" id=flash_timeid min="50" max="1500" step="50" onchange="changeValue(this.value, 'set_int?flash_time=', 'config')">High</td></tr>
-		<tr><td class="pc1">Flash duration</td><td class="pc2"><span id="flash_time_value"></span> ms</td></tr>
+		<tr><td style="height: 1px;"></td><td style="height: 1px;"></td></tr>
+		<tr><td class="ps3">PrusaLink printer state</td><td></td></tr>
+		<tr><td class="pc1">Upload often only while printing</td><td class="pc2"><label class="switch"><input type="checkbox" name="prusalink" id=prusalinkid onchange="setPrusaLink()"><span class="checkbox_slider round"></span></label> <span id="status_prusalink"></span></td></tr>
+		<tr><td class="pc1">Printer IP address</td><td><input type="text" name="prusalink_host" id=prusalink_hostid placeholder="192.168.1.50"></td></tr>
+		<tr><td class="pc1">PrusaLink user</td><td><input type="text" name="prusalink_user" id=prusalink_userid placeholder="maker"></td></tr>
+		<tr><td class="pc1">PrusaLink password</td><td><input type="password" name="prusalink_password" id=prusalink_passwordid placeholder="unchanged">&nbsp;<button class="btn_save" onclick="setPrusaLink()">Save</button></td></tr>
+		<tr><td class="pc1">PrusaLink status</td><td class="pc2"><span id="prusalink_status"></span></td></tr>
+		<tr><td class="pc1">Printer state</td><td class="pc2"><span id="printer_state"></span> <span id="job_progress"></span></td></tr>
 		<tr><td style="height: 1px;"></td><td style="height: 1px;"></td></tr>
 		<tr><td class="pc1">Save images to micro SD</td><td class="pc2"><label class="switch"><input type="checkbox" name="timelaps" id=timelapsid onchange="changeValue(this.checked, 'set_bool?timelaps_enable=', 'config')"><span class="checkbox_slider round"></span></label> <span id="status_timelaps"></span></td></tr>
 		<tr><td style="height: 1px;"></td><td style="height: 1px;"></td></tr>
@@ -299,17 +341,17 @@ const char page_config_html[] PROGMEM = R"rawliteral(
 		</table></center>
 	</div>
 </body>
-<script src="scripts.js"></script>
+<script src="scripts.js?v=1.1.2-c1"></script>
 <script>
 	get_data("config");
 	setupCollapsibleButtons();
+	setupPhotoSizeEstimate();
 </script>
 )rawliteral";
 
 /* ------------------------------------------------------------------------------------------------------------ */
 const char page_system_html[] PROGMEM = R"rawliteral(
-<style>@import url("styles.css?v=1.0.0");</style>
-<script src="jquery-3.7.0.min.js"></script>
+<style>@import url("styles.css?v=1.1.2-c1");</style>
 <body>
 	<center>
         <table id="data">
@@ -319,9 +361,21 @@ const char page_system_html[] PROGMEM = R"rawliteral(
 			<tr><td class="ps1">Wi-Fi service AP SSID</td><td class="ps2" id="service_ap_ssid"></td></tr>
             <tr><td class="ps1">Uptime</td><td class="ps2" id="uptime"></td></tr>
 			<tr><td class="ps1">ESP32 Temperature</td><td class="ps2" id="mcu_temp"></td></tr>
+			<tr><td class="ps1">Current upload interval [s]</td><td class="ps2" id="upload_interval"></td></tr>
+			<tr><td style="height: 1px;"></td><td style="height: 1px;"></td></tr>
+			<tr><td class="ps3">Health</td><td></td></tr>
+			<tr><td class="ps1">Camera health (shown in Prusa Connect)</td><td class="ps2" id="health_status"></td></tr>
+			<tr><td class="ps1">Photos uploaded since start</td><td class="ps2"><span id="upload_ok"></span> OK, <span id="upload_failed"></span> failed</td></tr>
+			<tr><td class="ps1">Unplanned restarts</td><td class="ps2" id="unplanned_restarts"></td></tr>
+			<tr><td class="ps1">Last restart</td><td class="ps2" id="last_restart"></td></tr>
+			<tr><td class="ps1">Highest ESP32 temperature since start</td><td class="ps2" id="mcu_temp_max"></td></tr>
+			<tr><td class="ps1">Internal RAM</td><td class="ps2" id="mem_internal"></td></tr>
+			<tr><td class="ps1">PSRAM</td><td class="ps2" id="mem_psram"></td></tr>
 			<tr><td style="height: 1px;"></td><td style="height: 1px;"></td></tr>
 			<tr><td class="ps3">Firmware</td><td></td></tr>
-            <tr><td class="ps1">Version</td><td class="ps2" id="sw_ver"></td></tr>
+            <tr><td class="ps1">Installed version</td><td class="ps2" id="sw_ver"></td></tr>
+			<tr id="latest_release_row" style="display: none;"><td class="ps1">Latest release</td><td class="ps2" id="latest_release" style="line-height: 16px; color: #e08a00;"></td></tr>
+			<tr><td class="ps1">Based on</td><td class="ps2"><a href="https://github.com/prusa3d/Prusa-Firmware-ESP32-Cam/releases/tag/v1.1.2" target="_blank" rel="noopener">Prusa ESP32 cam v1.1.2</a> by Miroslav Pivovarsky</td></tr>
 			<tr><td class="ps1">Build</td><td class="ps2" id="sw_build"></td></tr>
             <tr><td style="height: 1px;"></td><td style="height: 1px;"></td></tr>
 			<tr><td class="ps3">Configuration</td><td></td></tr>
@@ -333,6 +387,15 @@ const char page_system_html[] PROGMEM = R"rawliteral(
 					<option value="1">Warning</option>
 					<option value="2">Info</option>
 					<option value="3">Verbose</option>
+				</select>
+			   </td>
+		   </tr>
+		   <tr>
+			    <td class="pc1">Status LED</td><td><label for="status_led"></label>
+				<select class="select" id="status_ledid" name="status_led" onchange="changeValue(this.value, 'set_int?status_led=', 'system')">
+					<option value="0">On</option>
+					<option value="1">Errors only</option>
+					<option value="2">Off</option>
 				</select>
 			   </td>
 		   </tr>
@@ -348,52 +411,18 @@ const char page_system_html[] PROGMEM = R"rawliteral(
     <br>
     <center>
         <table id="update">
-            <tr><td class="ps3">Firmware update</td><td></td></tr>
-			<tr><td class="ps1">Available from cloud</td><td class="ps2"><span id="sw_new_ver"></span> &nbsp;<button class="btn_update" onclick="checkUpdate()">Check for Updates</button></td></tr>
-            <tr><td class="ps1">Status</td><td><span class="ps2" id="status">Ready</span></td></tr>
-			<tr><td class="ps1">Progress</td><td class="ps2"><div class="progress-container"><div class="progress-bar" id="myProgressBar">0%</div></div></td></tr>
-            <tr><td></td><td><input type="file" id="firmwareInput" accept=".bin"></td></tr>
-            <tr><td></td><td><input type="submit" class="btn_update" value="Update from File" onclick="uploadFile()"></td></tr>
-			<tr><td></td><td><input type="submit" class="btn_update" value="Update from Cloud" onclick="updateWeb()"></td></tr>
+            <tr><td class="ps3">Firmware update from file</td><td></td></tr>
+            <tr><td class="ps1">Firmware file (.bin)</td><td><input type="file" id="firmwareInput" accept=".bin"></td></tr>
+            <tr><td></td><td><button class="btn_update" onclick="uploadFirmware()">Upload and install</button></td></tr>
+            <tr><td class="ps1">Progress</td><td class="ps2"><div class="progress-container"><div class="progress-bar" id="firmwareProgress">0%</div></div></td></tr>
+            <tr><td class="ps1">Status</td><td class="ps2" id="firmwareStatus">Ready</td></tr>
+            <tr><td></td><td class="ps2">Use the application file: <b>ESP32_PrusaConnectCam.ino.bin</b> from this repository, or <b>XIAO_ESP32S3.bin</b> from the original Prusa releases. After installing the original firmware, do a factory reset.</td></tr>
         </table>
     </center>
 </body>
-<script src="scripts.js"></script>
+<script src="scripts.js?v=1.1.2-c1"></script>
 <script>
-    var updateCompleted = false;
-	var updateInterval = setInterval(updateProgress, 800);
 	get_data("system");
-</script>
-)rawliteral";
-
-/* ------------------------------------------------------------------------------------------------------------ */
-const char page_temperature_html[] PROGMEM = R"rawliteral(
-<style>@import url("styles.css?v=1.0.0");</style>
-<script src="jquery-3.7.0.min.js"></script>
-<body>
-	<center>
-		<table>
-			<tr><td class=pa3>External temperature sensor DHT22/DHT11</td><td></td></tr>
-			<tr><td class=pa1 align="right">Enable sensors</td><td><label class="switch"><input type="checkbox" name="extsens_en" id="extsetsid" onchange="changeValue(this.checked, 'set_bool?extsens_enable=', 'temp')"><span class="checkbox_slider round"></span></label></label> <span class=pa1 id="status_extsens"></span></td></tr>
-            <tr><td class="ps1">Sensor status: </td><td class="pa2" id="extsens_stat"></td></tr>
-			<tr><td style="height: 1px;"></td><td style="height: 1px;"></td></tr>
-            <tr>
-			    <td class="pa1">Temperature Unit</td><td><label for="temp_unit"></label>
-				<select class="select" id="temp_unitid" name="temp_unit" onchange="changeValue(this.value, 'set_int?temp_unit=', 'temp')">
-					<option value="0">Celsius</option>
-					<option value="1">Fahrenheit</option>
-				</select>
-			   </td>
-		    </tr>
-			<tr><td style="height: 1px;"></td><td style="height: 1px;"></td></tr>
-			<tr><td class="pa1">Temperature</td><td class="pa2" id="ext_temp"></td></tr>
-            <tr><td class="pa1">Humidity</td><td class="pa2" id="ext_hum"></td></tr>
-		</table>
-	</center>
-</body>
-<script src="scripts.js"></script>
-<script>
-	get_data("temp");
 </script>
 )rawliteral";
 
@@ -902,146 +931,326 @@ input:checked+.checkbox_slider:before {
     background-color: #FA6831;
     color: white;
 }
+
+/* confirmation after a setting is saved */
+.save_status {
+	display: none;
+	position: fixed;
+	bottom: 24px;
+	left: 50%;
+	transform: translateX(-50%);
+	max-width: 90%;
+	padding: 8px 16px;
+	border-radius: 4px;
+	text-align: center;
+	color: #ffffff;
+	font-size: 14px;
+	line-height: 18px;
+	z-index: 1000;
+}
 )rawliteral";
 
 /* ------------------------------------------------------------------------------------------------------------ */
 const char scripts_js[] PROGMEM = R"rawliteral(
-function get_data(val) {
-	jQuery.ajax({
-		url: 'json_input',
-		type: 'GET',
-		timeout: 5000,
-		success: function(data) {
-			console.log("Incommming data: ");
-			console.log(data);
-			var obj = JSON.parse(data);
-			console.log(obj);
+/* set the text of an element, a missing element is skipped */
+function setText(id, value) {
+	var element = document.getElementById(id);
+	if (element) {
+		element.textContent = value;
+	}
+}
 
-			if (!document.querySelector('#light-icon img')) {
-				var img = document.createElement('img');
-				img.src = (obj.led == "true") ? 'light-on-icon.svg' : 'light-off-icon.svg';
-				document.getElementById('light-icon').appendChild(img);
-			}
-			document.title = obj.mdns;
-			
-			if (val == "config") {
-				$("#fingerprint").text(obj.fingerprint);
-				$("#refreshInterval").text(obj.refreshInterval);
-				document.getElementById('tokenid').value = obj.token;
-				document.getElementById('refreshid').value = obj.refreshInterval;
-				document.getElementById('photo_qualityid').value = obj.photoquality;
-				document.getElementById('framesizeid').value = obj.framesize;
-				document.getElementById('brightnessid').value = obj.brightness;
-				document.getElementById('contrastid').value = obj.contrast;
-				document.getElementById('saturationid').value = obj.saturation;
-				document.getElementById('image_rotationid').value = obj.image_rotation;
-				document.getElementById('hmirrorid').checked = obj.hmirror;
-				document.getElementById('vflipid').checked = obj.vflip;
-				document.getElementById('lencid').checked = obj.lensc;
-				document.getElementById('exposure_ctrlid').checked = obj.exposure_ctrl;
-				document.getElementById('awbid').checked = obj.awb;
-				document.getElementById('awb_gainid').checked = obj.awb_gain;
-				document.getElementById('wb_modeid').value = obj.wb_mode;
-				document.getElementById('ledid').checked = obj.led;
-				document.getElementById('flashid').checked = obj.flash;
-				document.getElementById('flash_timeid').value = obj.flash_time;
-				document.getElementById('bpcid').checked = obj.bpc;
-				document.getElementById('wpcid').checked = obj.wpc;
-				document.getElementById('raw_gamaid').checked = obj.raw_gama;
-				document.getElementById('aec2id').checked = obj.aec2;
-				document.getElementById('ae_levelid').value = obj.ae_level;
-				document.getElementById('aec_valueid').value = obj.aec_value;
-				document.getElementById('gain_ctrlid').checked = obj.gain_ctrl;
-				document.getElementById('agc_gainid').value = obj.agc_gain;
-				document.getElementById("flash_time_value").innerText = obj.flash_time;
-				document.getElementById("aec_value_value").innerText = obj.aec_value;
-				document.getElementById('timelapsid').checked = obj.timelaps;
-				$("#status_hmirror").text((obj.hmirror == "true") ? "On" : "Off");
-				$("#status_vflip").text((obj.vflip == "true") ? "On" : "Off");
-				$("#status_lensc").text((obj.lensc == "true") ? "On" : "Off");
-				$("#status_exposure_ctrl").text((obj.exposure_ctrl == "true") ? "On" : "Off");
-				$("#status_awb").text((obj.awb == "true") ? "On" : "Off");
-				$("#status_awb_gain").text((obj.awb_gain == "true") ? "On" : "Off");
-				$("#status_led").text((obj.led == "true") ? "On" : "Off");
-				$("#status_flash").text((obj.flash == "true") ? "On" : "Off");
-				$("#status_bpc").text((obj.bpc == "true") ? "On" : "Off");
-				$("#status_wpc").text((obj.wpc == "true") ? "On" : "Off");
-				$("#status_raw_gama").text((obj.raw_gama == "true") ? "On" : "Off");
-				$("#status_aec2").text((obj.aec2 == "true") ? "On" : "Off");
-				$("#status_gain_ctrl").text((obj.gain_ctrl == "true") ? "On" : "Off");
-				$("#status_timelaps").text((obj.timelaps == "true") ? "On" : "Off");
-				sliderCheck();
-			}
-
-			if (val == "auth") {
-				document.getElementById('authid').checked = obj.auth;
-				$("#status_auth").text((obj.auth == "true") ? "On" : "Off");
-				document.getElementById('auth_username').value = obj.auth_username;
-			}
-
-			if (val == "wifi") {
-				document.getElementById('serviceapid').checked = obj.serviceap;
-				$("#status_serviceap").text((obj.serviceap == "true") ? "On" : "Off");
-				$("#ssid").text(obj.ssid);
-				$("#rssi").text(obj.rssi);
-				$("#rssi_percentage").text(obj.rssi_percentage);
-				$("#ip").text(obj.ip);
-				$("#mdns").text(obj.mdns);
-				$("#wifi_network_status").text(obj.wifi_network_status);
-				document.getElementById('ipcfgid').value = obj.ip_cfg;
-				document.getElementById('net_ip_id').value = obj.net_ip;
-				document.getElementById('net_mask_id').value = obj.net_mask;
-				document.getElementById('net_gw_id').value = obj.net_gw;
-				document.getElementById('net_dns_id').value = obj.net_dns;
-
-				if (!document.querySelector('#main-wifi-signal wifi_img')) {
-					var wifi_img = document.createElement('wifi_img');
-					wifi_img.width = 19;
-					wifi_img.height = 12;
-					wifi_img.src = getIconPath(obj.rssi);
-					document.getElementById('main-wifi-signal').appendChild(wifi_img);
-				}
-			}
-
-			if (val == "system") {
-				$("#uptime").text(obj.uptime);
-				$("#sw_ver").text(obj.sw_ver);
-				$("#sw_build").text(obj.sw_build);
-				$("#last_upload_status").text(obj.last_upload_status);
-				$("#wifi_mode").text(obj.wifi_mode);
-				$("#sw_new_ver").text(obj.sw_new_ver);
-				$("#service_ap_ssid").text(obj.service_ap_ssid);
-				$("#sd_status").text(obj.sd_status);
-				$("#sd_total").text(obj.sd_total);
-				$("#sd_free_p").text(obj.sd_free_p);
-				$("#sd_used_p").text(obj.sd_used_p);
-				$("#mcu_temp").text(obj.mcu_temp);
-
-				var sd_free_prog = document.getElementById("progress_bar_sd_free");
-				sd_free_prog.style.width = obj.sd_free_p + "%";
-				sd_free_prog.innerHTML = obj.sd_free_p + "%";
-
-				var sd_free_prog = document.getElementById("progress_bar_sd_used");
-				sd_free_prog.style.width = obj.sd_used_p + "%";
-				sd_free_prog.innerHTML = obj.sd_used_p + "%";
-
-				document.getElementById('mdnsid').value = obj.mdns;
-        		document.getElementById('loglevelid').value = obj.log_level;
-			}
-
-			if (val == "temp") {
-				$("#extsens_stat").text(obj.extsens_stat);
-				document.getElementById('extsetsid').checked = obj.extsen_en;
-				document.getElementById('temp_unitid').value = obj.exttemp_unit;
-				$("#ext_temp").text(obj.ext_temp);
-				$("#ext_hum").text(obj.ext_hum);
-			}
-		},
-		error: function(html) {
-			console.log("json Timeout or error");
-			//alert("jquery timeout or comunication error");
-		}
+/* GET request with a timeout, returns a promise with the response text */
+function getText(url, timeout) {
+	var controller = new AbortController();
+	var timer = setTimeout(function() { controller.abort(); }, timeout);
+	return fetch(url, { signal: controller.signal }).then(function(response) {
+		clearTimeout(timer);
+		return response.text();
 	});
+}
+
+function get_data(val) {
+	getText('json_input', 5000).then(function(data) {
+		var obj = JSON.parse(data);
+
+		document.title = obj.mdns;
+		setText('refreshInterval', obj.upload_interval);
+		
+		if (val == "config") {
+			setText('fingerprint', obj.fingerprint);
+			/* the camera sends only the end of the token, a new token is pasted into the empty field.
+			   The field is not cleared here: a pasted token stays when another setting is changed before Save */
+			document.getElementById('tokenid').placeholder = (obj.token != "") ? obj.token : "paste the token from Prusa Connect";
+			document.getElementById('refreshid').value = obj.refreshInterval;
+			document.getElementById('photo_qualityid').value = obj.photoquality;
+			/* show only the resolutions supported by the detected camera sensor */
+			var supported = obj.framesize_supported.split(",");
+			var framesizeOptions = document.getElementById('framesizeid').options;
+			for (var i = 0; i < framesizeOptions.length; i++) {
+				var available = supported.includes(framesizeOptions[i].value);
+				framesizeOptions[i].hidden = !available;
+				framesizeOptions[i].disabled = !available;
+			}
+			document.getElementById('framesizeid').value = obj.framesize;
+			setText('camera_detected', obj.camera_detected);
+			setText('camera_autofocus', obj.camera_autofocus);
+			document.getElementById('brightnessid').value = obj.brightness;
+			document.getElementById('contrastid').value = obj.contrast;
+			document.getElementById('saturationid').value = obj.saturation;
+			document.getElementById('image_rotationid').value = obj.image_rotation;
+			document.getElementById('hmirrorid').checked = (obj.hmirror == "true");
+			document.getElementById('vflipid').checked = (obj.vflip == "true");
+			document.getElementById('lencid').checked = (obj.lensc == "true");
+			document.getElementById('exposure_ctrlid').checked = (obj.exposure_ctrl == "true");
+			document.getElementById('awbid').checked = (obj.awb == "true");
+			document.getElementById('awb_gainid').checked = (obj.awb_gain == "true");
+			document.getElementById('wb_modeid').value = obj.wb_mode;
+			document.getElementById('bpcid').checked = (obj.bpc == "true");
+			document.getElementById('wpcid').checked = (obj.wpc == "true");
+			document.getElementById('raw_gamaid').checked = (obj.raw_gama == "true");
+			document.getElementById('aec2id').checked = (obj.aec2 == "true");
+			document.getElementById('ae_levelid').value = obj.ae_level;
+			document.getElementById('aec_valueid').value = obj.aec_value;
+			document.getElementById('gain_ctrlid').checked = (obj.gain_ctrl == "true");
+			document.getElementById('agc_gainid').value = obj.agc_gain;
+			document.getElementById("aec_value_value").innerText = obj.aec_value;
+			document.getElementById('timelapsid').checked = (obj.timelaps == "true");
+			document.getElementById('prusalinkid').checked = (obj.prusalink_enable == "true");
+			document.getElementById('prusalink_hostid').value = obj.prusalink_host;
+			document.getElementById('prusalink_userid').value = obj.prusalink_user;
+			setText('status_prusalink', (obj.prusalink_enable == "true") ? "On" : "Off");
+			setText('prusalink_status', obj.prusalink_status);
+			setText('printer_state', obj.printer_state);
+			setText('job_progress', (obj.printer_state == "PRINTING") ? obj.job_progress + " %" : "");
+			setText('status_hmirror', (obj.hmirror == "true") ? "On" : "Off");
+			setText('status_vflip', (obj.vflip == "true") ? "On" : "Off");
+			setText('status_lensc', (obj.lensc == "true") ? "On" : "Off");
+			setText('status_exposure_ctrl', (obj.exposure_ctrl == "true") ? "On" : "Off");
+			setText('status_awb', (obj.awb == "true") ? "On" : "Off");
+			setText('status_awb_gain', (obj.awb_gain == "true") ? "On" : "Off");
+			setText('status_bpc', (obj.bpc == "true") ? "On" : "Off");
+			setText('status_wpc', (obj.wpc == "true") ? "On" : "Off");
+			setText('status_raw_gama', (obj.raw_gama == "true") ? "On" : "Off");
+			setText('status_aec2', (obj.aec2 == "true") ? "On" : "Off");
+			setText('status_gain_ctrl', (obj.gain_ctrl == "true") ? "On" : "Off");
+			setText('status_timelaps', (obj.timelaps == "true") ? "On" : "Off");
+			sliderCheck();
+			PhotoSizeData = obj;
+			updatePhotoSizeEstimate();
+		}
+
+		if (val == "auth") {
+			document.getElementById('authid').checked = (obj.auth == "true");
+			setText('status_auth', (obj.auth == "true") ? "On" : "Off");
+			document.getElementById('auth_username').value = obj.auth_username;
+		}
+
+		if (val == "wifi") {
+			document.getElementById('serviceapid').checked = (obj.serviceap == "true");
+			setText('status_serviceap', (obj.serviceap == "true") ? "On" : "Off");
+			document.getElementById('wpa2_eapid').checked = (obj.wpa2_eap == "true");
+			setText('status_wpa2_eap', (obj.wpa2_eap == "true") ? "On" : "Off");
+			document.getElementById('wpa2_eap_identity_id').value = obj.wpa2_eap_identity;
+			document.getElementById('wpa2_eap_user_id').value = obj.wpa2_eap_user;
+			if (obj.wpa2_eap == "true") {
+				document.getElementById('wpa2_eap_ssid_id').value = obj.ssid;
+			}
+			setText('ssid', obj.ssid);
+			setText('rssi', obj.rssi);
+			setText('rssi_percentage', obj.rssi_percentage);
+			setText('ip', obj.ip);
+			setText('mdns', obj.mdns);
+			setText('wifi_network_status', obj.wifi_network_status);
+			document.getElementById('ipcfgid').value = obj.ip_cfg;
+			document.getElementById('net_ip_id').value = obj.net_ip;
+			document.getElementById('net_mask_id').value = obj.net_mask;
+			document.getElementById('net_gw_id').value = obj.net_gw;
+			document.getElementById('net_dns_id').value = obj.net_dns;
+
+			if (!document.querySelector('#main-wifi-signal wifi_img')) {
+				var wifi_img = document.createElement('wifi_img');
+				wifi_img.width = 19;
+				wifi_img.height = 12;
+				wifi_img.src = getIconPath(obj.rssi);
+				document.getElementById('main-wifi-signal').appendChild(wifi_img);
+			}
+		}
+
+		if (val == "system") {
+			setText('uptime', obj.uptime);
+			setText('sw_ver', obj.sw_ver);
+			checkLatestRelease(obj.sw_ver);
+			setText('sw_build', obj.sw_build);
+			setText('last_upload_status', obj.last_upload_status);
+			setText('wifi_mode', obj.wifi_mode);
+			setText('service_ap_ssid', obj.service_ap_ssid);
+			setText('sd_status', obj.sd_status);
+			setText('sd_total', obj.sd_total);
+			setText('sd_free_p', obj.sd_free_p);
+			setText('sd_used_p', obj.sd_used_p);
+			setText('mcu_temp', obj.mcu_temp);
+			setText('upload_interval', obj.upload_interval);
+			setText('health_status', obj.health_status);
+			setText('upload_ok', obj.upload_ok);
+			setText('upload_failed', obj.upload_failed);
+			setText('unplanned_restarts', obj.unplanned_restarts);
+			setText('last_restart', obj.last_restart);
+			setText('mcu_temp_max', obj.mcu_temp_max);
+			setText('mem_internal', obj.mem_internal);
+			setText('mem_psram', obj.mem_psram);
+
+			var sd_free_prog = document.getElementById("progress_bar_sd_free");
+			sd_free_prog.style.width = obj.sd_free_p + "%";
+			sd_free_prog.innerHTML = obj.sd_free_p + "%";
+
+			var sd_free_prog = document.getElementById("progress_bar_sd_used");
+			sd_free_prog.style.width = obj.sd_used_p + "%";
+			sd_free_prog.innerHTML = obj.sd_used_p + "%";
+
+			document.getElementById('mdnsid').value = obj.mdns;
+			document.getElementById('loglevelid').value = obj.log_level;
+			document.getElementById('status_ledid').value = obj.status_led;
+		}
+	}).catch(function(error) {
+		console.log("json timeout or error: " + error);
+	});
+}
+
+/* photo size estimate on the Camera page. The size grows with the pixels and with the JPEG quality.
+   With a photo from this camera the estimate scales its real size, so it knows the scene. Without a photo
+   it uses a typical scene */
+var PhotoSizeData = null;
+
+/* pixels of a resolution from the list, the option text starts with "1600x1200" */
+function photoPixels(framesize) {
+	var option = document.querySelector('#framesizeid option[value="' + framesize + '"]');
+	if (!option) {
+		return 0;
+	}
+	var size = option.text.split(' ')[0].split('x');
+	return parseInt(size[0]) * parseInt(size[1]);
+}
+
+/* relative bytes per pixel of a JPEG quality 10-63 (lower is better) */
+function photoQualityFactor(quality) {
+	return Math.pow(10 / quality, 0.8);
+}
+
+function updatePhotoSizeEstimate() {
+	var estimateText = document.getElementById('photo_size_estimate');
+	var warningText = document.getElementById('photo_size_warning');
+	if (!PhotoSizeData || !estimateText || !warningText) {
+		return;
+	}
+
+	var data = PhotoSizeData;
+	var max = data.photo_max_size;
+	var pixels = photoPixels(document.getElementById('framesizeid').value);
+	/* the slider is reversed: right = better quality = lower JPEG quality value, like on the camera */
+	var quality = 73 - document.getElementById('photo_qualityid').value;
+	var lastPixels = photoPixels(data.last_photo_framesize);
+	var estimate = 0;
+	var margin = 0;
+	var basis = "";
+
+	if ((data.last_photo_size > 0) && (lastPixels > 0) && (data.last_photo_quality >= 10)) {
+		estimate = data.last_photo_size * (pixels / lastPixels) * (photoQualityFactor(quality) / photoQualityFactor(data.last_photo_quality));
+		margin = 1.2;
+		basis = "based on the last photo";
+	} else {
+		estimate = pixels * 0.14 * photoQualityFactor(quality);
+		margin = 1.5;
+		basis = "typical scene, no photo yet";
+	}
+
+	var size = (estimate >= 1000000) ? ((estimate / 1000000).toFixed(2) + " MB") : (Math.round(estimate / 1000) + " KB");
+	estimateText.textContent = "about " + size + " (" + basis + ")";
+
+	if (estimate > max) {
+		estimateText.style.color = "#d32f2f";
+		warningText.style.color = "#d32f2f";
+		warningText.textContent = "Too large: this firmware only supports photos up to 1 MB (Prusa Camera Service limit), larger photos are not uploaded. Lower the resolution or the image quality.";
+	} else if ((estimate * margin) > max) {
+		estimateText.style.color = "#e08a00";
+		warningText.style.color = "#e08a00";
+		warningText.textContent = "Close to the 1 MB limit: a photo with more detail can be larger and is then not uploaded.";
+	} else {
+		estimateText.style.color = "#2e7d32";
+		warningText.style.color = "";
+		warningText.textContent = "";
+	}
+}
+
+/* a newer release on GitHub. The browser asks GitHub, not the camera. The row is shown only when a newer version exists,
+   nothing is shown without a release, without internet in the browser (for example on the service AP) or when up to date.
+   Asked once per page load */
+var LatestRelease = null;
+
+/* numbers of a version, "v1.1.2-c14" -> [1, 1, 2, 14] */
+function versionNumbers(version) {
+	return (String(version).match(/[0-9]+/g) || []).map(function(n) { return parseInt(n); });
+}
+
+/* > 0 when version a is newer than version b */
+function compareVersions(a, b) {
+	var x = versionNumbers(a);
+	var y = versionNumbers(b);
+	for (var i = 0; i < Math.max(x.length, y.length); i++) {
+		var d = (x[i] || 0) - (y[i] || 0);
+		if (d != 0) {
+			return d;
+		}
+	}
+	return 0;
+}
+
+function showLatestRelease(installed) {
+	var row = document.getElementById('latest_release_row');
+	var cell = document.getElementById('latest_release');
+	if (!row || !cell || !LatestRelease || !LatestRelease.version || (compareVersions(LatestRelease.version, installed) <= 0)) {
+		return;
+	}
+	var link = document.createElement('a');
+	link.href = LatestRelease.url;
+	link.target = "_blank";
+	link.rel = "noopener";
+	link.textContent = LatestRelease.version;
+	cell.textContent = "";
+	cell.append("There is a new version. Latest release: ", link);
+	row.style.display = "";
+}
+
+function checkLatestRelease(installed) {
+	if (LatestRelease) {
+		showLatestRelease(installed);
+		return;
+	}
+	fetch('https://api.github.com/repos/amorim1005/Prusa-Firmware-XIAO-ESP32-S3-Sense-Webcam-Core-One/releases/latest', { cache: 'no-store' }).then(function(response) {
+		if (!response.ok) {
+			return {};
+		}
+		return response.json().then(function(release) {
+			return { version: String(release.tag_name).replace(/^v/, ""), url: release.html_url };
+		});
+	}).catch(function(error) {
+		return {};
+	}).then(function(release) {
+		LatestRelease = release;
+		showLatestRelease(installed);
+	});
+}
+
+/* the photo was read from the camera: its real size is the new base of the estimate, when the Camera page is open */
+function photoLoaded() {
+	if (document.getElementById('photo_size_estimate')) {
+		get_data("config");
+	}
+}
+
+function setupPhotoSizeEstimate() {
+	document.getElementById('photo_qualityid').addEventListener('input', updatePhotoSizeEstimate);
+	document.getElementById('framesizeid').addEventListener('change', updatePhotoSizeEstimate);
 }
 
 function sliderCheck() {
@@ -1098,8 +1307,24 @@ function openImage() {
 	OpenImageclickCount++;
 }
 
+/* request that changes the camera. The header shows the camera that the request comes from its own page: a page of
+   another site cannot add it (CORS), so it cannot change the camera (CSRF). POST data is form encoded */
+function cameraRequest(method, url, async) {
+	var xhr = new XMLHttpRequest();
+	xhr.open(method, url, async);
+	xhr.setRequestHeader("X-Requested-With", "PrusaESP32Cam");
+	return xhr;
+}
+
+function cameraPost(url, data) {
+	var xhr = cameraRequest("POST", url, false);
+	xhr.setRequestHeader("Content-Type", "application/x-www-form-urlencoded");
+	xhr.send(data);
+	return xhr;
+}
+
 function actionButton(url, reload, msg) {
-    var xhr = new XMLHttpRequest();
+    var xhr = cameraRequest('GET', url, true);
     
 	if (msg != '') {
 		alert(msg);
@@ -1115,7 +1340,6 @@ function actionButton(url, reload, msg) {
         }
     };
 
-    xhr.open('GET', url, true);
     xhr.send();
 }
 
@@ -1147,26 +1371,31 @@ function addClickListener(id) {
 
 /* wifi page */
 function setWifi(val_ssid, val_pass) {
-	var xmlHttp = new XMLHttpRequest();
-	xmlHttp.open("GET", "wifi_cfg?wifi_ssid=" +  encodeURIComponent(val_ssid) + "&wifi_pass=" + encodeURIComponent(val_pass), false);
-	xmlHttp.send(null);
-	alert(xmlHttp.responseText);
+	/* POST: the password is not in the URL */
+	var xmlHttp = cameraPost("wifi_cfg", "wifi_ssid=" + encodeURIComponent(val_ssid) + "&wifi_pass=" + encodeURIComponent(val_pass));
+	showSaveResult(xmlHttp.responseText, xmlHttp.status);
+	get_data("wifi");
+}
+
+function setWPA2EAP(val_ssid, val_identity, val_user, val_pass) {
+	/* POST: the password is not in the URL. Empty password = the saved password stays */
+	var xmlHttp = cameraPost("wifi_wpa2_eap", "ssid=" + encodeURIComponent(val_ssid) + "&identity=" + encodeURIComponent(val_identity) + "&user=" + encodeURIComponent(val_user) + "&pass=" + encodeURIComponent(val_pass));
+	showSaveResult(xmlHttp.responseText, xmlHttp.status);
+	document.getElementById('wpa2_eap_pass_id').value = "";
 	get_data("wifi");
 }
 
 function setWifiNet(val_ip, val_mask, val_gw, val_dns) {	
-	var xmlHttp = new XMLHttpRequest();
-	xmlHttp.open("GET", "wifi_net_cfg?ip=" +  encodeURIComponent(val_ip) + "&mask=" + encodeURIComponent(val_mask) + "&gw=" + encodeURIComponent(val_gw) + "&dns=" + encodeURIComponent(val_dns), false);
+	var xmlHttp = cameraRequest("GET", "wifi_net_cfg?ip=" +  encodeURIComponent(val_ip) + "&mask=" + encodeURIComponent(val_mask) + "&gw=" + encodeURIComponent(val_gw) + "&dns=" + encodeURIComponent(val_dns), false);
 	xmlHttp.send(null);
-	alert(xmlHttp.responseText);
+	showSaveResult(xmlHttp.responseText, xmlHttp.status);
 	get_data("wifi");
 }
 
 function scanWifi() {
-	var xmlHttp = new XMLHttpRequest();
-	xmlHttp.open("GET", "wifi_scan?", false);
+	var xmlHttp = cameraRequest("GET", "wifi_scan?", false);
 	xmlHttp.send(null);
-	alert(xmlHttp.responseText);
+	showSaveResult(xmlHttp.responseText, xmlHttp.status);
 	get_data("wifi");
 	setTimeout(function() {
 		GetDataAndPrintTableWiFi();
@@ -1174,57 +1403,91 @@ function scanWifi() {
 }
 
 function GetDataAndPrintTableWiFi() {
-	$("#wifi_ntw").find("tr:gt(0)").remove();
-	$.ajax({
-		url: 'json_wifi',
-		type: 'GET',
-		timeout: 15000,
-		dataType: 'json',
-		data: {},
-
-		success: function(data) {
-			for (var i = 0; i < data.length; i++) {
-				const IconName = "wifi-icon-" + i;
-				var row = $('<tr><td>' + data[i].ssid + '</td><td><div id="' + IconName + '" style="display: flex; align-items: center;"></div></td><td>' + data[i].channel + '</td><td>' + data[i].encryption + '</td></tr>');
-				$('#wifi_ntw').append(row);
-
-				if (!document.querySelector('#' + IconName + ' img')) {
-					var img = document.createElement('img');
-					img.src = getIconPath(data[i].rssi);
-					document.getElementById(IconName).prepend(img);
-					document.getElementById(IconName).append(data[i].rssi_percentage);
-					document.getElementById(IconName).append("% / ");
-					document.getElementById(IconName).append(data[i].rssi);
-					document.getElementById(IconName).append("dBm");
-				}
-			}
-		},
-		error: function(jqXHR, textStatus, errorThrown) {
-			console.log('Error:' + textStatus + '-' + errorThrown);
+	var table = document.getElementById('wifi_ntw');
+	/* keep the header row */
+	while (table.rows.length > 1) {
+		table.deleteRow(1);
+	}
+	getText('json_wifi', 15000).then(function(text) {
+		var data = JSON.parse(text);
+		for (var i = 0; i < data.length; i++) {
+			var row = table.insertRow(-1);
+			var signal = document.createElement('div');
+			signal.style.display = 'flex';
+			signal.style.alignItems = 'center';
+			var img = document.createElement('img');
+			img.src = getIconPath(data[i].rssi);
+			signal.append(img, data[i].rssi_percentage + "% / " + data[i].rssi + "dBm");
+			row.insertCell(-1).textContent = data[i].ssid;
+			row.insertCell(-1).appendChild(signal);
+			row.insertCell(-1).textContent = data[i].channel;
+			row.insertCell(-1).textContent = data[i].encryption;
 		}
+	}).catch(function(error) {
+		console.log('Error: ' + error);
 	});
+}
+
+/* PrusaLink cfg, the password is sent only when the user typed a new one */
+function setPrusaLink() {
+	var data = "enable=" + document.getElementById('prusalinkid').checked
+		+ "&host=" + encodeURIComponent(document.getElementById('prusalink_hostid').value)
+		+ "&user=" + encodeURIComponent(document.getElementById('prusalink_userid').value)
+		+ "&password=" + encodeURIComponent(document.getElementById('prusalink_passwordid').value);
+	var xmlHttp = cameraPost("set_prusalink", data);
+	showSaveResult(xmlHttp.responseText, xmlHttp.status);
+	document.getElementById('prusalink_passwordid').value = "";
+	get_data("config");
 }
 
 /* auth page */
 function setAuth(val_name, val_pass) {
-	var xmlHttp = new XMLHttpRequest();
-	xmlHttp.open("GET", "basicauth_cfg?" + "auth_username=" + encodeURIComponent(val_name) + "&auth_password=" + encodeURIComponent(val_pass), false);
-	xmlHttp.send(null);
-	alert(xmlHttp.responseText);
+	var xmlHttp = cameraPost("basicauth_cfg", "auth_username=" + encodeURIComponent(val_name) + "&auth_password=" + encodeURIComponent(val_pass));
+	showSaveResult(xmlHttp.responseText, xmlHttp.status);
 	get_data("auth");
 }
 
-function changeValue(val, url, reload, msg) {
-	var xmlHttp = new XMLHttpRequest();
-	xmlHttp.open("GET", url + val, false);
+/* save a new Prusa Connect token, the field is cleared after a successful save */
+function saveToken() {
+	var field = document.getElementById('tokenid');
+	var xmlHttp = cameraRequest("GET", "set_token?token=" + encodeURIComponent(field.value), false);
 	xmlHttp.send(null);
-	if ((url == "set_int?refresh=") || (url == "set_token?token=") || (url == "set_mdns?mdns=") || (url == "set_int?ipcfg=")) {
-		alert(xmlHttp.responseText);
+	showSaveResult(xmlHttp.responseText, xmlHttp.status);
+	if ((xmlHttp.status == 200) && !xmlHttp.responseText.startsWith("ERROR")) {
+		field.value = "";
 	}
-	if (url == "set_flash_time?flash_time=") {
-		document.getElementById("flash_time_value").innerText = val;
-	}
+	get_data("config");
+}
+
+function changeValue(val, url, reload, msg) {
+	var xmlHttp = cameraRequest("GET", url + val, false);
+	xmlHttp.send(null);
+	showSaveResult(xmlHttp.responseText, xmlHttp.status);
 	get_data(reload);
+}
+
+/* result of a save as a short message at the bottom instead of a popup. The settings are saved on every change without
+   a Save button. "Save cfg OK" is shown as "Saved" for 2 s, other messages (reboot needed, registration, errors) longer with their text */
+var SaveStatusTimer = null;
+function showSaveResult(text, status) {
+	var ok = (status == 200) && !text.startsWith("ERROR") && (text.indexOf("NOT OK") < 0);
+	var plain = (text == "Save cfg OK") || (text == "Save cfg NOT OK!") || (text == "");
+	var toast = document.getElementById('save_status');
+	if (!toast) {
+		toast = document.createElement('div');
+		toast.id = 'save_status';
+		toast.className = 'save_status';
+		document.body.appendChild(toast);
+	}
+	if (plain) {
+		toast.innerHTML = ok ? "Saved &#10004;" : "Not saved &#10006;";
+	} else {
+		toast.textContent = text;
+	}
+	toast.style.backgroundColor = ok ? "#2e7d32" : "#d32f2f";
+	toast.style.display = "block";
+	clearTimeout(SaveStatusTimer);
+	SaveStatusTimer = setTimeout(function() { toast.style.display = "none"; }, (plain && ok) ? 2000 : 6000);
 }
 
 function togglePasswordVisibility() {
@@ -1243,118 +1506,42 @@ function togglePasswordVisibility() {
 	}
 }
 
-/* system page */
-if (typeof uploadingFirmware === 'undefined') {
-	var uploadingFirmware = false;
-}
+/* system page: firmware update from file */
+function uploadFirmware() {
+	var file = document.getElementById('firmwareInput').files[0];
+	var status = document.getElementById('firmwareStatus');
+	var bar = document.getElementById('firmwareProgress');
 
-if (typeof FileSize === 'undefined') {
-	var FileSize = 0;
-}
-
-function uploadFile() {
-	alert("Started updating...");
-	const firmwareInput = document.getElementById('firmwareInput');
-	const statusDiv = document.getElementById('status');
-	const file = firmwareInput.files[0];
-	FileSize = file.size;
-	SetFirmwareSize(file.size);
-
-	if (file) {
-		statusDiv.innerText = 'Updating...';
-		const formData = new FormData();
-		formData.append('firmware', file);
-		uploadingFirmware = true;
-
-		fetch('/upload', {
-				method: 'POST',
-				body: formData,
-			})
-			.then((response) => {
-				if (response.ok) {
-					response.text().then((data) => {
-						const jsonData = JSON.parse(data);
-						updateProgress();
-						uploadingFirmware = false;
-						if (jsonData.errorMessage) {
-							alert(`Error message: ${jsonData.errorMessage}`);
-						}
-					});
-				} else {
-					uploadingFirmware = false;
-					response.text().then((errorMessage) => {
-						alert(`Error message: ${errorMessage}`);
-					});
-				}
-			})
-			.catch((error) => {
-				console.error('Error:', error);
-				uploadingFirmware = false;
-			});
-	} else {
-		statusDiv.innerText = 'No file selected';
+	if (!file) {
+		status.innerText = 'No file selected';
+		return;
 	}
-}
-
-function SetFirmwareSize(val) {
-	var xmlHttp = new XMLHttpRequest();
-	xmlHttp.open("GET", "set_firmware_size?size=" + val, false);
-	xmlHttp.send(null);
-}
-
-function updateProgress() {
-	if (!uploadingFirmware) {
+	if (!confirm('Install ' + file.name + '? The camera restarts after the upload.')) {
 		return;
 	}
 
-	fetch('/UpdateProcessing', {
-			method: 'GET',
-		})
-		.then((response) => {
-			if (response.ok) {
-				return response.json();
-			} else {
-				throw new Error('Failed to fetch progress');
-			}
-		})
-		.then((data) => {
-			const statusDiv = document.getElementById('status');
-			var progressBar = document.getElementById("myProgressBar");
-			progressBar.style.width = data.processed_percent + "%";
-			progressBar.innerHTML = data.processed_percent + "%";
+	var formData = new FormData();
+	formData.append('firmware', file, file.name);
 
-			statusDiv.innerText = data.message;
-			uploadingFirmware = data.updating;
-			if (data.updating == false  && !updateCompleted) {
-				alert('Operation done. Please reboot MCU.');
-				uploadingFirmware = false;
-				updateCompleted = true;
-				clearInterval(updateInterval);
-			}
-		})
-		.catch((error) => {
-			console.error('Error:', error);
-			var progressBar = document.getElementById("myProgressBar");
-			progressBar.innerHTML = "Error";
-			clearInterval(updateInterval);
-		});
-}
-
-function checkUpdate() {
-	var xmlHttp = new XMLHttpRequest();
-	alert("Connecting to server... Please wait several seconds");
-	xmlHttp.open("GET", "/check_web_ota_update", false);
-	xmlHttp.send(null);
-	alert(xmlHttp.responseText);
-	get_data("system");
-}
-
-function updateWeb() {
-	alert("Started updating from cloud.");
-	var xmlHttp = new XMLHttpRequest();
-	xmlHttp.open("GET", "web_ota_update?update=true", false);
-	xmlHttp.send(null);
-	uploadingFirmware = true;
+	var xhr = cameraRequest('POST', 'upload_firmware', true);
+	xhr.upload.onprogress = function(e) {
+		if (e.lengthComputable) {
+			var p = Math.round(e.loaded * 100 / e.total);
+			bar.style.width = p + '%';
+			bar.innerHTML = p + '%';
+		}
+	};
+	xhr.onload = function() {
+		status.innerText = xhr.responseText;
+		if (xhr.status == 200) {
+			setTimeout(function() { location.reload(); }, 20000);
+		}
+	};
+	xhr.onerror = function() {
+		status.innerText = 'Upload failed: connection error';
+	};
+	status.innerText = 'Uploading...';
+	xhr.send(formData);
 }
 
 function validatePasswords() {
@@ -1384,37 +1571,31 @@ if ((document.getElementById("auth_password")) && (document.getElementById("auth
 	validatePasswords();
 }
 
+/* the section after the button opens and closes */
+function setupCollapsible(selector) {
+	document.querySelectorAll(selector).forEach(function(button) {
+		button.addEventListener('click', function() {
+			button.classList.toggle('active');
+			var content = button.parentElement.nextElementSibling;
+			content.style.display = (getComputedStyle(content).display === 'block') ? 'none' : 'block';
+		});
+	});
+}
+
 function setupCollapsibleButtons() {
-    $(".btn_collapsible").click(function(){
-        $(this).toggleClass("active");
-        var content = $(this).parent().next();
-        if (content.css("display") === "block") {
-            content.css("display", "none");
-        } else {
-            content.css("display", "block");
-        }
-    });
+	setupCollapsible('.btn_collapsible');
 }
 
 function setupCollapsibleButtonsWiFi() {
-    $(".btn_collapsible_wifi").click(function(){
-        $(this).toggleClass("active");
-        var content_wifi = $(this).parent().next();
-        if (content_wifi.css("display") === "block") {
-            content_wifi.css("display", "none");
-        } else {
-            content_wifi.css("display", "block");
-        }
-    });
+	setupCollapsible('.btn_collapsible_wifi');
 }
 )rawliteral";
 
 /* ------------------------------------------------------------------------------------------------------------ */
 const char license_html[] PROGMEM = R"rawliteral(
-<style>@import url("styles.css?v=1.0.0");</style>
-<script src="jquery-3.7.0.min.js"></script>
+<style>@import url("styles.css?v=1.1.2-c1");</style>
 <center><p>The software for device falls under the <a href="https://www.gnu.org/licenses/gpl-3.0.html" id="license-link">GPL-3.0 license terms</a>. To read the license terms please visit <a href="https://www.gnu.org/licenses/gpl-3.0.html" id="license-link-sec">this page</a>.</p></center>
-<script src="scripts.js"></script>
+<script src="scripts.js?v=1.1.2-c1"></script>
 <script>
     addClickListener('license-link');
     addClickListener('license-link-sec');
@@ -1422,36 +1603,72 @@ const char license_html[] PROGMEM = R"rawliteral(
 )rawliteral";
 
 /* ------------------------------------------------------------------------------------------------------------ */
-const char gtac_html[] PROGMEM = R"rawliteral(
-<style>@import url("styles.css?v=1.0.0");</style>
-<script src="jquery-3.7.0.min.js"></script>
-<center><p>To read the General Terms and Conditions, please visit <a href="https://www.prusa3d.com/page/general-terms-and-conditions_231236/" id="gtac-link">this page</a>.</p></center>
-<script src="scripts.js"></script>
+const char stream_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE HTML><html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Stream</title>
+	<style>
+		body { margin: 0; background-color: #000000; font-family: sans-serif; }
+		img { display: block; max-width: 100%; margin: 0 auto; }
+		#stream_msg { display: none; position: fixed; top: 0; left: 0; right: 0; padding: 8px; text-align: center; color: #ffffff; font-size: 14px; line-height: 18px; }
+	</style>
+</head>
+<body>
+	<div id="stream_msg"></div>
+	<img id="stream" src="stream.mjpg" alt="Stream" onerror="streamError()">
 <script>
-    addClickListener('gtac-link');
-</script>
-)rawliteral";
+/* the stream stops or slows down when the camera is too hot, this page tells why and starts it again when it cools down */
+var StreamStopped = false;
+var StreamFailed = false;
 
-/* ------------------------------------------------------------------------------------------------------------ */
-const char privacypolicy_html[] PROGMEM = R"rawliteral(
-<style>@import url("styles.css?v=1.0.0");</style>
-<script src="jquery-3.7.0.min.js"></script>
-<center><p>To read the Privacy Policy, please visit <a href="https://www.prusa3d.com/en/page/privacy-policy_231258/" id="privacy-link">this page</a>.</p></center>
-<script src="scripts.js"></script>
-<script>
-    addClickListener('privacy-link');
-</script>
-)rawliteral";
+function streamMessage(text, color) {
+	var msg = document.getElementById('stream_msg');
+	msg.textContent = text;
+	msg.style.backgroundColor = color;
+	msg.style.display = (text == "") ? "none" : "block";
+}
 
-/* ------------------------------------------------------------------------------------------------------------ */
-const char cookies_html[] PROGMEM = R"rawliteral(
-<style>@import url("styles.css?v=1.0.0");</style>
-<script src="jquery-3.7.0.min.js"></script>
-<center><p>To read the Cookie policy, please visit <a href="https://www.prusa3d.com/en/page/privacy-policy_231258/" id="cookies-link">this page</a>.</p></center>
-<script src="scripts.js"></script>
-<script>
-    addClickListener('cookies-link');
+function streamError() {
+	if (!StreamStopped) {
+		StreamFailed = true;
+		streamMessage("Stream not available: it is open in too many windows, or the camera is too hot", "#d32f2f");
+	}
+}
+
+function streamCheck() {
+	fetch('json_thermal', { cache: 'no-store' }).then(function(response) {
+		return response.json();
+	}).then(function(obj) {
+		var temp = String(obj.mcu_temp).split(' - ')[0];
+		var img = document.getElementById('stream');
+		if (obj.thermal_throttling == "true") {
+			StreamStopped = true;
+			img.removeAttribute('src');
+			streamMessage("Stream stopped: the camera is too hot (" + temp + "). It starts again when the camera cools down", "#d32f2f");
+		} else {
+			if (StreamStopped) {
+				StreamStopped = false;
+				StreamFailed = false;
+				img.src = "stream.mjpg?t=" + Date.now();
+			}
+			if (obj.thermal_slow == "true") {
+				streamMessage("The camera is hot (" + temp + "): the stream is slowed down to 1 frame per second", "#e08a00");
+			} else if (!StreamFailed) {
+				streamMessage("", "");
+			}
+		}
+	}).catch(function(error) {
+		console.log("json timeout or error: " + error);
+	});
+}
+
+streamCheck();
+setInterval(streamCheck, 3000);
 </script>
+</body>
+</html>
 )rawliteral";
 
 /* EOF  */

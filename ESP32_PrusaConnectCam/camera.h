@@ -13,6 +13,7 @@
 
 #include "esp_camera.h"
 #include "esp_timer.h"
+#include <esp_task_wdt.h>
 #include "img_converters.h"
 #include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
@@ -21,7 +22,8 @@
 #include "log.h"
 #include "cfg.h"
 #include "exif.h"
-#include "module_templates.h"
+#include "ESP32_OV5640_AF.h"
+#include "module_XIAO_ESP32-S3-cam.h"
 #include "mcu_cfg.h"
 #include "var.h"
 
@@ -55,39 +57,67 @@ private:
   bool vflip;                ///< vertical flip
   bool lensc;                ///< lens corection
   bool exposure_ctrl;        ///< exposure control
-  bool CameraFlashEnable;    ///< enable/disable camera flash function
-  uint16_t CameraFlashTime;  ///< camera fash duration time
-  int8_t CameraFlashPin;     ///< GPIO pin for LED
   framesize_t TFrameSize;    ///< framesize_t type for camera module
   uint8_t imageExifRotation; ///< image rotation. 0 degree: value 1, 90 degree: value 6, 180 degree: value 3, 270 degree: value 8
 
   bool CameraCaptureSuccess; ///< camera capture success
-  bool PhotoSending;         ///< photo sending
 
   /* OV2640 camera module pinout and cfg*/
   camera_config_t CameraConfig;             ///< camera configuration
   camera_fb_t *FrameBuffer;                 ///< frame buffer
-  camera_fb_t *FrameBufferDuplicate;        ///< frame buffer duplicate
-  camera_fb_t *FrameBufferExif;             ///< frame buffer with exif data
   sensor_t* sensor;                         ///< sensor
-  String Photo;                             ///< photo in string format
-  bool StreamOnOff;                         ///< stream on/off
-  bool StreamSendingPhoto;                  ///< sending photo to Prusa Connect during stream
+  bool StreamOnOff;                         ///< stream on/off, true when at least one stream client is connected
+
+  /* live stream: the capture task fills the buffers in turn, the WEB server sends the latest complete frame */
+  uint8_t *StreamBuf[CAMERA_STREAM_BUFFERS];          ///< stream frame buffers in PSRAM
+  size_t StreamBufLen[CAMERA_STREAM_BUFFERS];         ///< length of the frame in the buffer
+  size_t StreamBufCapacity[CAMERA_STREAM_BUFFERS];    ///< allocated size of the buffer
+  uint8_t StreamBufReaders[CAMERA_STREAM_BUFFERS];    ///< count of readers of the buffer, a buffer with readers is not overwritten
+  int8_t StreamLatest;                      ///< index of the latest complete frame, -1 = none
+  bool StreamLatestConsumed;                ///< the latest frame was taken by a reader
+  uint32_t StreamLatestTime;                ///< time of the latest frame [ms]
+  volatile uint32_t StreamFrameSeq;         ///< sequence number of the latest frame
+  volatile uint8_t StreamClients;           ///< count of connected stream clients
+  uint32_t LastPhotoSize;                   ///< size of the last photo that left the camera [B], 0 = no photo yet. The WEB page estimates the photo size from it
+  uint8_t LastPhotoFrameSize;               ///< resolution of the last photo, index of the WEB page list
+  uint8_t LastPhotoQuality;                 ///< JPEG quality of the last photo, 10-63, lower is better
+  uint8_t* SavedPhotoBuf;                   ///< copy of the last good photo in PSRAM, for /saved-photo.jpg when the camera has no photo (after a stream)
+  size_t SavedPhotoLen;                     ///< size of the saved photo copy [B], 0 = none
+  size_t SavedPhotoCapacity;                ///< allocated size of SavedPhotoBuf [B]
+  SemaphoreHandle_t savedPhotoMutex;        ///< mutex for the saved photo copy
+  SemaphoreHandle_t streamMutex;            ///< mutex for the stream buffer state (short operations only)
+  TaskHandle_t StreamTask;                  ///< stream capture task
   SemaphoreHandle_t frameBufferSemaphore;   ///< semaphore for frame buffer
   float StreamAverageFps;                   ///< stream average fps
   uint16_t StreamAverageSize;               ///< stream average size
   PhotoExifData_t PhotoExifData;            ///< photo exif data
   uint8_t CameraCaptureFailedCounter;       ///< camera capture failed counter
-  camera_pid_t CameraType;                  ///< camera type
-  String CameraName;                        ///< camera name
+  camera_pid_t CameraType;                  ///< detected camera sensor PID. 0 = not detected
+  String CameraName;                        ///< detected camera sensor name
+  framesize_t SensorMaxFrameSize;           ///< maximum frame size of the detected sensor
+  OV5640 Ov5640Autofocus;                   ///< OV5640 autofocus firmware loader
+  String AutofocusStatus;                   ///< autofocus status for the WEB page, only with afMutex
+  SemaphoreHandle_t afMutex;                ///< mutex for AutofocusStatus: the WEB server and the photo task (camera re-init) change it
+  void SetAutofocusStatus(String);
+  String GetAutofocusText();
+  bool AutofocusReady;                      ///< OV5640 autofocus firmware runs, the focus state can be read
 
   Configuration *config;                    ///< pointer to Configuration object
   Logs *log;                                ///< pointer to Logs object
 
   void InitCameraModule();
+  void InitCameraModule(framesize_t);
+  uint32_t GetSensorXclk();
+  void CheckFrameSizeLimit();
+  void InitAutofocus();
+  static void StreamTaskEntry(void *);
+  void StreamTaskLoop();
+  bool StreamCaptureFrame();
+  camera_pid_t TransformCameraSensorToPid(uint8_t);
+  uint8_t TransformPidToCameraSensor(camera_pid_t);
 
 public:
-  Camera(Configuration*, Logs*, int8_t);
+  Camera(Configuration*, Logs*);
   ~Camera(){};
   void Init();
   void ApplyCameraCfg();
@@ -95,10 +125,13 @@ public:
   void ReinitCameraModule();
   void GetCameraModel();
   void CapturePhoto();
-  void CaptureStream(camera_fb_t *);
   void CaptureReturnFrameBuffer();
+  void StartStreamTask();
   void SetStreamStatus(bool);
   bool GetStreamStatus();
+  uint8_t GetStreamClients();
+  bool StreamAcquireFrame(uint32_t, uint8_t **, size_t *, uint8_t *, uint32_t *, uint32_t);
+  void StreamReleaseFrame(uint8_t);
   bool GetCameraCaptureSuccess();
 
   void StreamSetFrameSize(uint16_t);
@@ -106,25 +139,19 @@ public:
   uint16_t StreamGetFrameAverageSize();
   float StreamGetFrameAverageFps();
   void StreamClearFrameData();
-  void StreamSetSendingPhoto(bool);
   
-  void CopyPhoto(camera_fb_t *);
-  void CopyPhoto(String*);
-  void CopyPhoto(String*, int, int);
-  void CopyPhoto(char*, int, int);
-  int GetPhotoSize();
-  String GetPhoto();
-  camera_fb_t *GetPhotoFb();
-  camera_fb_t* GetPhotoFbDuplicate();
-  PhotoExifData_t * GetPhotoExifData();
+  bool GetPhotoCopy(uint8_t **, size_t *);
+  bool GetSavedPhotoCopy(uint8_t **, size_t *);
+  void SaveLastPhoto(const uint8_t *, size_t, const uint8_t *, size_t);
   framesize_t TransformFrameSizeDataType(uint8_t);
-  void SetPhotoSending(bool);
   
-  void SetFlashStatus(bool);
-  bool GetFlashStatus();
 
-  void SetPhotoQuality(uint8_t);
-  void SetFrameSize(uint8_t);
+  bool SetPhotoQuality(uint8_t);
+  bool SetFrameSize(uint8_t);
+  bool CheckFrameSizeSupported(uint8_t);
+  String GetSupportedFrameSizes();
+  String GetDetectedSensorName();
+  String GetAutofocusStatus();
   void SetBrightness(int8_t);
   void SetContrast(int8_t);
   void SetSaturation(int8_t);
@@ -143,12 +170,13 @@ public:
   void SetVFlip(bool);
   void SetLensC(bool);
   void SetExposureCtrl(bool);
-  void SetCameraFlashEnable(bool);
-  void SetCameraFlashTime(uint16_t);
   void SetCameraImageRotation(uint8_t);
 
   uint8_t GetPhotoQuality();
   uint8_t GetFrameSize();
+  uint32_t GetLastPhotoSize();
+  uint8_t GetLastPhotoFrameSize();
+  uint8_t GetLastPhotoQuality();
   uint16_t GetFrameSizeWidth();
   uint16_t GetFrameSizeHeight();
   int8_t GetBrightness();
@@ -169,11 +197,9 @@ public:
   bool GetVFlip();
   bool GetLensC();
   bool GetExposureCtrl();
-  bool GetCameraFlashEnable();
-  uint16_t GetCameraFlashTime();
   uint8_t GetCameraImageRotation();
 };
 
 extern Camera SystemCamera; ///< Camera object
 
-/* EOF */
+/* EOF */

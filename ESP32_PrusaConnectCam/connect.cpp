@@ -27,6 +27,15 @@ PrusaConnect::PrusaConnect(Configuration *i_conf, Logs *i_log, Camera *i_camera,
   wifi = i_wifi;
   BackendAvailability = WaitForFirstConnection;
   SendDeviceInformationToBackend = true;
+  SendingIntervalCounter = 0;
+  SendNow = false;
+  BackoffInterval = 0;
+  ConnectFailCounter = 0;
+  UploadOkCount = 0;
+  UploadFailedCount = 0;
+  CaptureFailed = false;
+  HealthStatus = "";
+  CfgMutex = xSemaphoreCreateMutex();
 }
 
 /**
@@ -37,7 +46,7 @@ PrusaConnect::PrusaConnect(Configuration *i_conf, Logs *i_log, Camera *i_camera,
  */
 void PrusaConnect::Init() {
   log->AddEvent(LogLevel_Info, F("Init PrusaConnect lib"));
-  BackendReceivedStatus = F("Wait for first connection");
+  SetBackendReceivedStatus(F("Wait for first connection"));
 }
 
 /**
@@ -53,243 +62,389 @@ void PrusaConnect::LoadCfgFromEeprom() {
   RefreshInterval = config->LoadRefreshInterval();
   PrusaConnectHostname = config->LoadPrusaConnectHostname();
   EnableTimelapsPhotoSave = config->LoadTimeLapseFunctionStatus();
+
+  /* the old Prusa Connect camera API was moved to the Camera Service. Migrate the old default hostname */
+  if ((PrusaConnectHostname.length() == 0) || (PrusaConnectHostname == LEGACY_PRUSA_CONNECT_HOSTNAME)) {
+    log->AddEvent(LogLevel_Warning, F("Migrate backend hostname to: "), String(FACTORY_CFG_HOSTNAME));
+    SetPrusaConnectHostname(FACTORY_CFG_HOSTNAME);
+  }
+
+  if ((Fingerprint.length() < CAMERA_SERVICE_FINGERPRINT_MIN_LEN) || (Fingerprint.length() > CAMERA_SERVICE_FINGERPRINT_MAX_LEN)) {
+    log->AddEvent(LogLevel_Error, F("Fingerprint length is out of range 16-64: "), String(Fingerprint.length()));
+  }
 }
 
 /**
- * @brief take picture
- *
- * @param none
- * @return none
- */
-void PrusaConnect::TakePicture() {
-  camera->CapturePhoto();
-}
-
-/**
- * @brief Sending data to prusa connect backend
+ * @brief Open a new HTTPS connection to the backend
  * 
- * @param i_data  - data to send
- * @param i_content_type - data content type
- * @param i_type - type of data for log message
- * @param i_url_path - url path for backend
- * @param i_fragmentation - flag for enable/disable data fragmentation
- * @return true - if data was sent successfully
- * @return false - if data was not sent successfully
+ * @return true - connected
+ * @return false - connection failed, BackendReceivedStatus contains the error
  */
-bool PrusaConnect::SendDataToBackend(String *i_data, int i_data_length, String i_content_type, String i_type, String i_url_path, SendDataToBackendType i_data_type) {
-  WiFiClientSecure client;
-  BackendReceivedStatus = "";
-  bool ret = false;
-  log->AddEvent(LogLevel_Info, "Sending " + i_type + " to PrusaConnect, " + String(i_data_length) + " bytes");
+bool PrusaConnect::BackendConnect() {
+  String hostname = GetPrusaConnectHostname();
+  BackendClose();
+  BackendClient.setCACert(root_CAs);
+  BackendClient.setTimeout(BACKEND_SOCKET_TIMEOUT);
+  BackendClient.setHandshakeTimeout(TLS_HANDSHAKE_TIMEOUT);
+  BackendClient.setNoDelay(true);
 
-  /* check fingerprint and token length */
-  if ((Fingerprint.length() > 0) && (Token.length() > 0)) {
-    client.setCACert(root_CAs);
-    //client.setInsecure();
-    client.setTimeout(1000);
-    client.setNoDelay(true);
+  log->AddEvent(LogLevel_Verbose, F("Connecting to server..."));
+  esp_task_wdt_reset();
 
-    log->AddEvent(LogLevel_Verbose, F("Connecting to server..."));
-
-    /* connecting to server */
-    if (!client.connect(PrusaConnectHostname.c_str(), 443)) {
-      char err_buf[200];
-      int last_error = client.lastError(err_buf, sizeof(err_buf));
-      int error = client.getWriteError();
-      if (BackendAvailability != WaitForFirstConnection) {
-        BackendAvailability = BackendUnavailable;
-      }
-
-      BackendReceivedStatus = "Connetion failed to domain! Error: " + String(last_error) + " - " + String(err_buf) + " : " + String(error);
-      log->AddEvent(LogLevel_Info, BackendReceivedStatus + " ,BA:" + CovertBackendAvailabilitStatusToString(BackendAvailability));
-      return false;
-
-    } else {
-      /* send data to server */
-      log->AddEvent(LogLevel_Verbose, F("Connected to server!"));
-      client.println("PUT https://" + PrusaConnectHostname + i_url_path + " HTTP/1.1");
-      client.println("Host: " + PrusaConnectHostname);
-      client.println("User-Agent: ESP32-CAM");
-      client.println("Connection: close");
-
-      client.println("Content-Type: " + i_content_type);
-      client.println("fingerprint: " + Fingerprint);
-      client.println("token: " + Token);
-      client.println("Content-Length: " + String(i_data_length));
-      client.println();
-
-      esp_task_wdt_reset();
-      size_t sendet_data = 0;
-      /* sending photo */
-      if (SendPhoto == i_data_type) {
-        log->AddEvent(LogLevel_Verbose, F("Sendig photo"));
-
-        /* get photo buffer */
-        bool SendWithExif = false;
-        uint8_t *fbBuf = NULL;
-        size_t fbLen = 0;
-        if (camera->GetStreamStatus() == true) {
-          /* get duplicate photo buffer from camera */
-          fbBuf = camera->GetPhotoFbDuplicate()->buf;
-          fbLen = camera->GetPhotoFbDuplicate()->len;
-        } else {
-          /* get original photo buffer from camera */
-          fbBuf = camera->GetPhotoFb()->buf;
-          fbLen = camera->GetPhotoFb()->len;
-        }
-
-        /* sending exif data */
-        if ((camera->GetPhotoExifData()->header != NULL) && (camera->GetStreamStatus() == false)) {
-          SendWithExif = true;
-          sendet_data += client.write(camera->GetPhotoExifData()->header, camera->GetPhotoExifData()->len);
-          fbBuf += camera->GetPhotoExifData()->offset;
-          fbLen -= camera->GetPhotoExifData()->offset;
-        } else {
-          SendWithExif = false;
-        }
-
-        /* sending photo */
-        for (size_t i = 0; i < fbLen; i += PHOTO_FRAGMENT_SIZE) {
-          if ((i + PHOTO_FRAGMENT_SIZE) < fbLen) {
-            sendet_data += client.write(fbBuf, PHOTO_FRAGMENT_SIZE);
-            fbBuf += PHOTO_FRAGMENT_SIZE;
-
-          } else if ((fbLen % PHOTO_FRAGMENT_SIZE) > 0) {
-            size_t remainder = fbLen % PHOTO_FRAGMENT_SIZE;
-            sendet_data += client.write(fbBuf, remainder);
-          }
-        }
-        client.println("\r\n");
-
-        /* log message */
-        if (SendWithExif) {
-          SystemLog.AddEvent(LogLevel_Verbose, F("Photo with EXIF data sent"));
-        } else {
-          SystemLog.AddEvent(LogLevel_Warning, F("Photo without EXIF data sent"));
-        }
-
-        /* sending device information */
-      } else if (SendInfo == i_data_type) {
-        log->AddEvent(LogLevel_Verbose, F("Sending info"));
-        sendet_data = client.print(*i_data);
-      }
-
-      client.flush();
-      log->AddEvent(LogLevel_Info, "Send done: " + String(i_data_length) + "/" + String(sendet_data) + " bytes");
-
-      /* check if all data was sent */
-      if (i_data_length != sendet_data) {
-        BackendReceivedStatus = F("INCOMPLETE DATA SEND TO SERVER!");
-        log->AddEvent(LogLevel_Error, F("ERROR SEND DATA TO SERVER! INCORRECT DATA LENGTH!"));
-        client.stop();
-        return false;
-      }
-      //esp_task_wdt_reset();
-
-      /* read response from server */
-      String response = "";
-      String fullResponse = "";
-      delay(10); // wait for response
-      log->AddEvent(LogLevel_Verbose, F("Response:"));
-      while (client.connected()) {
-        if (client.available()) {
-          response = client.readStringUntil('\n');
-          fullResponse += response;
-          log->AddEvent(LogLevel_Verbose, response.c_str());
-
-          if (response.startsWith("HTTP/1.1")) {
-            int httpCode = response.substring(9, 12).toInt();
-            BackendReceivedStatus = i_type;
-            BackendReceivedStatus += ": ";
-            BackendReceivedStatus += ProcessHttpResponseCode(httpCode);
-            if (true == ProcessHttpResponseCodeBool(httpCode)) {
-              ret = true;
-            }
-          }
-        }
-      }
-      log->AddEvent(LogLevel_Verbose, "Full response: " + fullResponse);
-
-      BackendAvailability = BackendAvailable;
-      client.stop();
+  if (!BackendClient.connect(hostname.c_str(), 443)) {
+    char err_buf[200];
+    int last_error = BackendClient.lastError(err_buf, sizeof(err_buf));
+    if (BackendAvailability != WaitForFirstConnection) {
+      BackendAvailability = BackendUnavailable;
     }
-  } else {
-    /* err message */
-    log->AddEvent(LogLevel_Verbose, F("ERROR SEND DATA TO SERVER! INVALID DATA!"));
-    log->AddEvent(LogLevel_Verbose, "Fingerprint: " + Fingerprint);
-    log->AddEvent(LogLevel_Verbose, "Token: " + Token);
+    ConnectFailCounter++;
+    BackendClose();
 
-    if (Fingerprint.length() == 0) {
-      BackendReceivedStatus = F("Missing fingerprint");
-    } else if (Token.length() == 0) {
-      BackendReceivedStatus = F("Missing token");
+    String status = "Connection failed to domain! Error: " + String(last_error) + " - " + String(err_buf);
+    SetBackendReceivedStatus(status);
+    log->AddEvent(LogLevel_Info, status + " ,BA:" + CovertBackendAvailabilitStatusToString(BackendAvailability));
+    return false;
+  }
+
+  ConnectFailCounter = 0;
+  BackendClientHost = hostname;
+  log->AddEvent(LogLevel_Verbose, F("Connected to server!"));
+  return true;
+}
+
+/**
+ * @brief Close the HTTPS connection to the backend and release its memory
+ */
+void PrusaConnect::BackendClose() {
+  BackendClient.stop();
+  BackendClientHost = "";
+}
+
+/**
+ * @brief Send one HTTP request on the open connection and read the complete response
+ * 
+ * @param i_data - request body
+ * @param i_data_length - body length
+ * @param i_content_type - body content type
+ * @param i_url_path - url path
+ * @param i_keepAlive - ask the server to keep the connection open
+ * @param o_response - output, beginning of the response for the log
+ * @param o_close - output, true when the connection cannot be used for the next request
+ * @return int - HTTP response code. 0 = no response
+ */
+int PrusaConnect::BackendRequest(const uint8_t *i_data, size_t i_data_length, String i_content_type, String i_url_path, bool i_keepAlive, String *o_response, bool *o_close) {
+  *o_close = true;
+
+  /* send the request header in one write, every write is one TLS record */
+  String header = "PUT " + i_url_path + " HTTP/1.1\r\n";
+  header += "Host: " + GetPrusaConnectHostname() + "\r\n";
+  header += "User-Agent: " BACKEND_USER_AGENT "\r\n";
+  header += (true == i_keepAlive) ? "Connection: keep-alive\r\n" : "Connection: close\r\n";
+  header += "Content-Type: " + i_content_type + "\r\n";
+  header += "Fingerprint: " + Fingerprint + "\r\n";
+  header += "Token: " + GetToken() + "\r\n";
+  header += "Content-Length: " + String(i_data_length) + "\r\n\r\n";
+  if (BackendClient.print(header) != header.length()) {
+    return 0;
+  }
+
+  /* send body. write() can send less data than requested */
+  esp_task_wdt_reset();
+  size_t sent_data = 0;
+  while (sent_data < i_data_length) {
+    size_t chunk = min((size_t)PHOTO_FRAGMENT_SIZE, i_data_length - sent_data);
+    size_t written = BackendClient.write(i_data + sent_data, chunk);
+    if (written == 0) {
+      break;
+    }
+    sent_data += written;
+    esp_task_wdt_reset();
+  }
+  BackendClient.flush();
+  log->AddEvent(LogLevel_Verbose, "Send done: " + String(i_data_length) + "/" + String(sent_data) + " bytes");
+
+  if (i_data_length != sent_data) {
+    log->AddEvent(LogLevel_Error, F("ERROR SEND DATA TO SERVER! INCORRECT DATA LENGTH!"));
+    return 0;
+  }
+
+  /* read the status line and the headers. Never wait longer than BACKEND_RESPONSE_TIMEOUT */
+  int httpCode = 0;
+  long contentLength = -1;
+  bool headersDone = false;
+  bool serverClose = false;
+  unsigned long start = millis();
+  while ((millis() - start) < BACKEND_RESPONSE_TIMEOUT) {
+    if (!BackendClient.available()) {
+      if (!BackendClient.connected()) {
+        break;
+      }
+      delay(5);
+      esp_task_wdt_reset();
+      continue;
+    }
+
+    String line = BackendClient.readStringUntil('\n');
+    line.trim();
+    log->AddEvent(LogLevel_Verbose, line.c_str());
+
+    if (0 == httpCode) {
+      if (line.startsWith("HTTP/1.")) {
+        httpCode = line.substring(9, 12).toInt();
+        *o_response += line + " ";
+      }
+      continue;
+    }
+
+    if (line.length() == 0) {
+      headersDone = true;
+      break;
+    }
+
+    String lower = line;
+    lower.toLowerCase();
+    if (lower.startsWith("content-length:")) {
+      contentLength = lower.substring(15).toInt();
+    } else if (lower.startsWith("connection:") && (lower.indexOf("close") >= 0)) {
+      serverClose = true;
     }
   }
 
-  log->AddEvent(LogLevel_Info, "Upload done. Response code: " + BackendReceivedStatus + " ,BA:" + CovertBackendAvailabilitStatusToString(BackendAvailability));
-  return ret;
+  if (false == headersDone) {
+    log->AddEvent(LogLevel_Warning, F("Timeout or incomplete response from server"));
+    return httpCode;
+  }
+
+  /* read the body completely, otherwise the next request on this connection reads the rest of this one.
+     Keep the beginning for the log, the error body is a short JSON */
+  bool bodyDone = false;
+  if ((204 == httpCode) || (304 == httpCode)) {
+    /* these responses never have a body (RFC 9110), also without a Content-Length header */
+    bodyDone = true;
+  } else if (contentLength >= 0) {
+    long received = 0;
+    uint8_t buf[256];
+    while ((received < contentLength) && ((millis() - start) < BACKEND_RESPONSE_TIMEOUT)) {
+      int n = BackendClient.read(buf, min((long)sizeof(buf), contentLength - received));
+      if (n > 0) {
+        if (o_response->length() < 512) {
+          o_response->concat((const char *)buf, n);
+        }
+        received += n;
+      } else if (!BackendClient.connected()) {
+        break;
+      } else {
+        delay(5);
+        esp_task_wdt_reset();
+      }
+    }
+    bodyDone = (received == contentLength);
+  }
+
+  /* the connection is reusable only after a complete response: Content-Length, or a response without a body */
+  *o_close = (false == i_keepAlive) || serverClose || (false == bodyDone);
+  return httpCode;
+}
+
+/**
+ * @brief Sending data to the Camera Service backend. The HTTPS connection is kept open between uploads
+ *        when the upload interval is short, a new TLS handshake costs about 1 s of CPU time
+ * 
+ * @param i_data  - data to send
+ * @param i_data_length - data length
+ * @param i_content_type - data content type
+ * @param i_type - type of data for log message
+ * @param i_url_path - url path for backend
+ * @return int - HTTP response code. 0 = no response (connection failed, timeout, incomplete upload)
+ */
+int PrusaConnect::SendDataToBackend(const uint8_t *i_data, size_t i_data_length, String i_content_type, String i_type, String i_url_path) {
+  log->AddEvent(LogLevel_Verbose, "Sending " + i_type + " to PrusaConnect, " + String(i_data_length) + " bytes");
+
+  /* check fingerprint and token length */
+  if ((Fingerprint.length() == 0) || (GetToken().length() == 0)) {
+    log->AddEvent(LogLevel_Verbose, F("ERROR SEND DATA TO SERVER! INVALID DATA!"));
+    SetBackendReceivedStatus((Fingerprint.length() == 0) ? F("Missing fingerprint") : F("Missing token"));
+    return -1;
+  }
+
+  bool keepAlive = (GetEffectiveInterval() <= BACKEND_KEEPALIVE_MAX_INTERVAL);
+  int httpCode = 0;
+  String fullResponse = "";
+
+  /* second attempt only when a reused connection was closed by the server in the meantime */
+  for (uint8_t attempt = 0; attempt < 2; attempt++) {
+    bool reused = BackendClient.connected() && (BackendClientHost == GetPrusaConnectHostname());
+    if (reused) {
+      log->AddEvent(LogLevel_Verbose, F("Reusing connection to server"));
+    } else if (false == BackendConnect()) {
+      return 0;
+    }
+
+    bool closeConnection = true;
+    fullResponse = "";
+    httpCode = BackendRequest(i_data, i_data_length, i_content_type, i_url_path, keepAlive, &fullResponse, &closeConnection);
+    if (closeConnection) {
+      BackendClose();
+    }
+
+    if ((0 == httpCode) && reused && (0 == attempt)) {
+      log->AddEvent(LogLevel_Verbose, F("Reused connection was closed by the server, connecting again"));
+      continue;
+    }
+    break;
+  }
+
+  log->AddEvent(LogLevel_Verbose, "Full response: " + fullResponse);
+
+  String status = "";
+  if (0 == httpCode) {
+    status = i_type + F(": no response from server");
+    /* the connection was opened, but the server did not answer */
+    if (BackendAvailability != WaitForFirstConnection) {
+      BackendAvailability = BackendUnavailable;
+    }
+  } else {
+    status = i_type + ": " + ProcessHttpResponseCode(httpCode);
+    if (BackendResultOk != ProcessHttpResponseCodeClass(httpCode)) {
+      log->AddEvent(LogLevel_Warning, "Backend error response: " + fullResponse);
+    }
+    BackendAvailability = BackendAvailable;
+  }
+
+  SetBackendReceivedStatus(status);
+
+  log->AddEvent(LogLevel_Info, "Upload done: " + String(i_data_length) + " bytes. Response code: " + status + " ,BA:" + CovertBackendAvailabilitStatusToString(BackendAvailability));
+  return httpCode;
+}
+
+/**
+ * @brief Update the backoff interval according to the backend response
+ *
+ * @param int - http code from SendDataToBackend
+ * @param SendDataToBackendType - photo or info
+ * @return none
+ */
+void PrusaConnect::ProcessBackendResult(int i_code, SendDataToBackendType i_type) {
+  if (i_code < 0) {
+    /* missing token or fingerprint, nothing was sent */
+    return;
+  }
+
+  BackendResultClass result = ProcessHttpResponseCodeClass(i_code);
+
+  /* camera info rejected (4xx): the same data gives the same answer. Send it again only after a configuration change.
+     The photo upload has its own result, a wrong token is detected there and slows down the uploads */
+  if ((SendInfo == i_type) && (BackendResultTransient != result)) {
+    SendDeviceInformationToBackend = false;
+    if (BackendResultOk != result) {
+      log->AddEvent(LogLevel_Error, F("Camera info rejected by the backend, code: "), String(i_code));
+    }
+    return;
+  }
+
+  switch (result) {
+    case BackendResultOk:
+      if (BackoffInterval != 0) {
+        log->AddEvent(LogLevel_Info, F("Backend OK, backoff cleared"));
+      }
+      BackoffInterval = 0;
+      break;
+
+    case BackendResultTransient:
+      /* connection problem, rate limit or server error: double the waiting time up to BACKEND_BACKOFF_MAX */
+      BackoffInterval = (BackoffInterval == 0) ? RefreshInterval : min((uint16_t)(BackoffInterval * 2), (uint16_t)BACKEND_BACKOFF_MAX);
+      log->AddEvent(LogLevel_Warning, F("Backend temporary error, next attempt in [s]: "), String(BackoffInterval));
+      break;
+
+    case BackendResultClientError:
+      /* bad token, fingerprint or request. Retry rarely until the user changes the configuration */
+      BackoffInterval = BACKEND_BACKOFF_MAX;
+      log->AddEvent(LogLevel_Error, F("Backend rejected the request. Check the token. Next attempt in [s]: "), String(BackoffInterval));
+      break;
+
+    case BackendResultTooLarge:
+      log->AddEvent(LogLevel_Error, F("Photo is larger than 1 MB. Lower the resolution or the image quality!"));
+      break;
+  }
 }
 
 /**
  * @brief Send photo to prusa connect backend
  *
- * @param none
- * @return none
+ * @param const uint8_t * - photo data, JPEG with EXIF header
+ * @param size_t - photo length
+ * @return bool - true if the photo was accepted
  */
-void PrusaConnect::SendPhotoToBackend() {
-  log->AddEvent(LogLevel_Info, F("Start sending photo to prusaconnect"));
-  camera->SetPhotoSending(true);
-  String Photo = "";
-  size_t total_len = 0;
+bool PrusaConnect::SendPhotoToBackend(const uint8_t *i_data, size_t i_len) {
+  log->AddEvent(LogLevel_Verbose, F("Start sending photo to prusaconnect"));
 
-  if ((camera->GetPhotoExifData()->header != NULL) && (camera->GetStreamStatus() == false)) {
-    total_len = camera->GetPhotoExifData()->len + camera->GetPhotoFb()->len - camera->GetPhotoExifData()->offset;
-  } else if (camera->GetStreamStatus() == false) {
-    total_len = camera->GetPhotoFb()->len;
-  } else {
-    total_len = camera->GetPhotoFbDuplicate()->len;
+  if (i_len > CAMERA_SERVICE_SNAPSHOT_MAX_SIZE) {
+    String status = "Photo: too large " + String(i_len) + " B, maximum is 1 MB. Lower the resolution or quality";
+    SetBackendReceivedStatus(status);
+    log->AddEvent(LogLevel_Error, status);
+    return false;
   }
-  SendDataToBackend(&Photo, total_len, F("image/jpg"), F("Photo"), HOST_URL_CAM_PATH, SendPhoto);
-  camera->SetPhotoSending(false);
+
+  int code = SendDataToBackend(i_data, i_len, F("image/jpeg"), F("Photo"), HOST_URL_CAM_PATH);
+  ProcessBackendResult(code, SendPhoto);
+
+  return (BackendResultOk == ProcessHttpResponseCodeClass(code));
 }
 
 /**
  * @brief seding device info to prusaconnect backend
  * 
+ * @return bool - false when the info was not accepted because of a temporary problem (connection, server)
  */
-void PrusaConnect::SendInfoToBackend() {
+bool PrusaConnect::SendInfoToBackend() {
   if (false == SendDeviceInformationToBackend) {
-    return;
-
-  } else {
-    log->AddEvent(LogLevel_Info, F("Start sending device information to prusaconnect"));
-
-    JsonDocument json_data;
-    String json_string = "";
-
-    JsonObject config = json_data["config"].to<JsonObject>();
-    config["name"] = wifi->GetMdns();
-    config["firmware"] = SW_VERSION;
-    config["manufacturer"] = F("Prusa");
-    config["model"] = BOARD_NAME;
-
-    JsonObject resolution = config["resolution"].to<JsonObject>();
-    resolution["width"] = SystemCamera.GetFrameSizeWidth();
-    resolution["height"] = SystemCamera.GetFrameSizeHeight();
-
-    JsonObject network_info = config["network_info"].to<JsonObject>();
-    network_info["wifi_mac"] = SystemWifiMngt.GetWifiMac();
-    network_info["wifi_ipv4"] = SystemWifiMngt.GetStaIp();
-    network_info["wifi_ssid"] = SystemWifiMngt.GetStaSsid();
-
-    serializeJson(json_data, json_string);
-    log->AddEvent(LogLevel_Info, "Data: " + json_string);
-    bool response = SendDataToBackend(&json_string, json_string.length(), F("application/json"), F("Info"), HOST_URL_INFO_PATH, SendInfo);
-
-    if (true == response) {
-      SendDeviceInformationToBackend = false;
-    }
+    return true;
   }
+
+  log->AddEvent(LogLevel_Info, F("Start sending device information to prusaconnect"));
+
+  /* https://camera-service.prusa3d.com/docs/guide/camera-info. Unknown keys are rejected, config is replaced as a whole */
+  JsonDocument json_data;
+  String json_string = "";
+
+  String name = wifi->GetMdns();
+  if (name.length() == 0) {
+    name = F("ESP32 camera");
+  }
+
+  /* the Camera Service has no status field: a camera problem is shown as a part of the name, for example "camera [HOT]" */
+  String health = GetHealthStatus();
+  String suffix = (health.length() > 0) ? (" [" + health + "]") : "";
+
+  JsonObject config = json_data["config"].to<JsonObject>();
+  config["name"] = name.substring(0, CAMERA_SERVICE_NAME_MAX_LEN - suffix.length()) + suffix;
+  config["trigger_scheme"] = TranslateRefreshIntervalToTriggerScheme(RefreshInterval);
+  config["rotation"] = TranslateExifRotationToDegree(camera->GetCameraImageRotation());
+
+  JsonObject resolution = config["resolution"].to<JsonObject>();
+  resolution["width"] = camera->GetFrameSizeWidth();
+  resolution["height"] = camera->GetFrameSizeHeight();
+
+  JsonObject network_info = config["network_info"].to<JsonObject>();
+  network_info["wifi_mac"] = wifi->GetWifiMac();
+  network_info["wifi_ipv4"] = wifi->GetStaIp();
+  network_info["wifi_ssid"] = wifi->GetStaSsid();
+
+  JsonArray features = json_data["features"].to<JsonArray>();
+  features.add("snapshot");
+
+  JsonObject device = json_data["device"].to<JsonObject>();
+  device["type"] = F("ESP32");
+  device["model"] = String(BOARD_NAME) + " " + camera->GetDetectedSensorName();
+  device["firmware_version"] = String(SW_VERSION).substring(0, CAMERA_SERVICE_FW_VERSION_MAX_LEN);
+  device["hardware_version"] = String(BOARD_NAME).substring(0, CAMERA_SERVICE_HW_VERSION_MAX_LEN);
+
+  serializeJson(json_data, json_string);
+  log->AddEvent(LogLevel_Info, "Data: " + json_string);
+  int code = SendDataToBackend((const uint8_t *)json_string.c_str(), json_string.length(), F("application/json"), F("Info"), HOST_URL_INFO_PATH);
+  ProcessBackendResult(code, SendInfo);
+
+  return (BackendResultTransient != ProcessHttpResponseCodeClass(code));
 }
 
 /**
@@ -302,25 +457,35 @@ void PrusaConnect::TakePictureAndSendToBackend() {
   camera->CapturePhoto();
 
   /* check if photo was captured */
-  if (camera->GetCameraCaptureSuccess() == true) {
-
-    /* send photo to backend */
-    SendPhotoToBackend();
-
-    /* save photo to SD card */
-    if (false == camera->GetStreamStatus()) {
-      SavePhotoToSdCard();
-    }
-
-  } else {
+  CaptureFailed = (camera->GetCameraCaptureSuccess() == false);
+  if (true == CaptureFailed) {
     log->AddEvent(LogLevel_Error, F("Error capturing photo. Stop sending to backend!"));
+    SetBackendReceivedStatus(F("Photo: camera capture failed"));
+    UploadFailedCount++;
+    return;
   }
-  
-  /* return frame buffer */
-  if (camera->GetStreamStatus() == true) {
-    /* set stream flag for sending photo to false */
-    camera->StreamSetSendingPhoto(false);
+
+  /* the upload works with its own copy of the photo, the camera can capture a new one in the meantime */
+  uint8_t *photo = NULL;
+  size_t photo_len = 0;
+  if (false == camera->GetPhotoCopy(&photo, &photo_len)) {
+    log->AddEvent(LogLevel_Error, F("Error copying photo. Stop sending to backend!"));
+    UploadFailedCount++;
+    return;
   }
+
+  if (true == SendPhotoToBackend(photo, photo_len)) {
+    UploadOkCount++;
+  } else {
+    UploadFailedCount++;
+  }
+
+  /* save photo to SD card */
+  if (false == camera->GetStreamStatus()) {
+    SavePhotoToSdCard(photo, photo_len);
+  }
+
+  free(photo);
 }
 
 /**
@@ -347,10 +512,10 @@ String PrusaConnect::ProcessHttpResponseCode(int code) {
       ret = F("400 - Some data received is not valid");
       break;
     case 401:
-      ret = F("401 - Missing security toker or it is not valid");
+      ret = F("401 - Missing token or fingerprint");
       break;
     case 403:
-      ret = F("403 - Security toke is not valid or is outdated");
+      ret = F("403 - Token is not valid, fingerprint mismatch, or the camera was not registered within 15 minutes");
       break;
     case 404:
       ret = F("404 - Entity not found or invalid auth token");
@@ -358,8 +523,26 @@ String PrusaConnect::ProcessHttpResponseCode(int code) {
     case 409:
       ret = F("409 - Conflict with the state of target resource (user error)");
       break;
+    case 411:
+      ret = F("411 - Missing Content-Length");
+      break;
+    case 413:
+      ret = F("413 - Photo is larger than 1 MB. Lower the resolution or quality");
+      break;
+    case 415:
+      ret = F("415 - Unsupported content type");
+      break;
+    case 422:
+      ret = F("422 - Validation error. Token must have 20 characters");
+      break;
+    case 429:
+      ret = F("429 - Too many uploads. Waiting before next attempt");
+      break;
+    case 500:
+      ret = F("500 - Server error. Try again later");
+      break;
     case 503:
-      ret += F("503 - Service is unavailable at this moment. Try again later");
+      ret = F("503 - Service is unavailable or rate limited. Try again later");
       break;
     default:
       ret = String(code);
@@ -369,56 +552,66 @@ String PrusaConnect::ProcessHttpResponseCode(int code) {
 
   return ret;
 }
+
 /**
- * @brief Translate http response code to boolean
+ * @brief Classify http response code, the Camera Service documentation says what to do with each code
  * 
- * @param code - http response code
- * @return true - if response code is OK
- * @return false - if response code is not OK
+ * @param code - http response code. 0 = no response
+ * @return BackendResultClass - result class
  */
-bool PrusaConnect::ProcessHttpResponseCodeBool(int code) {
-  bool ret = false;
-  switch (code) {
-    case 200:
-      ret = true;
-      break;
-    case 201:
-      ret = true;
-      break;
-    case 204:
-      ret = true;
-      break;
-    case 304:
-      ret = false;
-      break;
-    case 400:
-      ret = false;
-      break;
-    case 401:
-      ret = false;
-      break;
-    case 403:
-      ret = false;
-      break;
-    case 404:
-      ret = false;
-      break;
-    case 409:
-      ret = false;
-      break;
-    case 503:
-      ret = false;
-      break;
-    default:
-      ret = false;
-      break;
+BackendResultClass PrusaConnect::ProcessHttpResponseCodeClass(int code) {
+  if ((code >= 200) && (code < 300)) {
+    return BackendResultOk;
+  } else if (413 == code) {
+    return BackendResultTooLarge;
+  } else if ((code <= 0) || (408 == code) || (429 == code) || (code >= 500)) {
+    return BackendResultTransient;
   }
 
-  return ret;
+  return BackendResultClientError;
 }
 
 /**
- * @brief Update device information
+ * @brief Translate refresh interval to Camera Service trigger scheme
+ *
+ * @param uint16_t - interval [s]
+ * @return String - trigger scheme
+ */
+String PrusaConnect::TranslateRefreshIntervalToTriggerScheme(uint16_t i_interval) {
+  switch (i_interval) {
+    case REFRESH_INTERVAL_TEN_SEC:
+      return F("TEN_SEC");
+    case REFRESH_INTERVAL_SIXTY_SEC:
+      return F("SIXTY_SEC");
+    case REFRESH_INTERVAL_TEN_MIN:
+      return F("TEN_MIN");
+    case REFRESH_INTERVAL_THIRTY_SEC:
+    default:
+      return F("THIRTY_SEC");
+  }
+}
+
+/**
+ * @brief Translate EXIF orientation to physical rotation in degrees
+ *
+ * @param uint8_t - EXIF orientation. 1 - 0°, 6 - 90°, 3 - 180°, 8 - 270°
+ * @return int - rotation in degrees
+ */
+int PrusaConnect::TranslateExifRotationToDegree(uint8_t i_rotation) {
+  switch (i_rotation) {
+    case 6:
+      return 90;
+    case 3:
+      return 180;
+    case 8:
+      return 270;
+    default:
+      return 0;
+  }
+}
+
+/**
+ * @brief Update device information. Camera info is sent again before the next photo
  *
  * @param none
  * @return none
@@ -428,14 +621,25 @@ void PrusaConnect::UpdateDeviceInformation() {
 }
 
 /**
+ * @brief Check if the refresh interval is one of the Camera Service trigger schemes
+ *
+ * @param uint16_t i_data - refresh interval [s]
+ * @return bool - true if the interval is valid
+ */
+bool PrusaConnect::CheckRefreshInterval(uint16_t i_data) {
+  return ((REFRESH_INTERVAL_TEN_SEC == i_data) || (REFRESH_INTERVAL_THIRTY_SEC == i_data) || (REFRESH_INTERVAL_SIXTY_SEC == i_data) || (REFRESH_INTERVAL_TEN_MIN == i_data));
+}
+
+/**
  * @brief Set refresh interval
  *
- * @param uint8_t i_data - refresh interval
+ * @param uint16_t i_data - refresh interval [s]
  * @return none
  */
-void PrusaConnect::SetRefreshInterval(uint8_t i_data) {
+void PrusaConnect::SetRefreshInterval(uint16_t i_data) {
   RefreshInterval = i_data;
   config->SaveRefreshInterval(RefreshInterval);
+  UpdateDeviceInformation();
 }
 
 /**
@@ -445,8 +649,15 @@ void PrusaConnect::SetRefreshInterval(uint8_t i_data) {
  * @return none
  */
 void PrusaConnect::SetToken(String i_data) {
+  xSemaphoreTake(CfgMutex, portMAX_DELAY);
   Token = i_data;
-  config->SaveToken(Token);
+  xSemaphoreGive(CfgMutex);
+  config->SaveToken(i_data);
+
+  /* new token: register the camera immediately, the first call must arrive within 15 minutes */
+  BackoffInterval = 0;
+  UpdateDeviceInformation();
+  SetSendingIntervalExpired();
 }
 
 /**
@@ -465,8 +676,12 @@ void PrusaConnect::SetBackendAvailabilitStatus(BackendAvailabilitStatus i_data) 
  * @param String i_data - hostname
  */
 void PrusaConnect::SetPrusaConnectHostname(String i_data) {
+  xSemaphoreTake(CfgMutex, portMAX_DELAY);
   PrusaConnectHostname = i_data;
-  config->SavePrusaConnectHostname(PrusaConnectHostname);
+  xSemaphoreGive(CfgMutex);
+  config->SavePrusaConnectHostname(i_data);
+  BackoffInterval = 0;
+  UpdateDeviceInformation();
 }
 
 /**
@@ -481,10 +696,11 @@ void PrusaConnect::SetTimeLapsPhotoSaveStatus(bool i_data) {
 
 /**
    @brief Function for saving photo to SD card
-   @param none
+   @param uint8_t * - photo data with EXIF header
+   @param size_t - photo length
    @return none
 */
-void PrusaConnect::SavePhotoToSdCard() {
+void PrusaConnect::SavePhotoToSdCard(uint8_t *i_data, size_t i_len) {
 #if (ENABLE_SD_CARD == true)
   /* check if time laps photo save is enabled */
   if (EnableTimelapsPhotoSave == true) {
@@ -509,19 +725,10 @@ void PrusaConnect::SavePhotoToSdCard() {
     log->AddEvent(LogLevel_Verbose, F("Saving file: "), FileName);
 
     /* save photo to SD card */
-    if (camera->GetPhotoExifData()->header != NULL) {
-      if (log->WritePicture(FileName, camera->GetPhotoFb()->buf + camera->GetPhotoExifData()->offset, camera->GetPhotoFb()->len - camera->GetPhotoExifData()->offset, camera->GetPhotoExifData()->header, camera->GetPhotoExifData()->len) == true) {
-        log->AddEvent(LogLevel_Info, F("Photo saved to SD card. EXIF"));
-      } else {
-        log->AddEvent(LogLevel_Error, F("Error saving photo to SD card. EXIF"));
-      }
-
+    if (log->WritePicture(FileName, i_data, i_len) == true) {
+      log->AddEvent(LogLevel_Info, F("Photo saved to SD card"));
     } else {
-      if (log->WritePicture(FileName, camera->GetPhotoFb()->buf, camera->GetPhotoFb()->len) == true) {
-        log->AddEvent(LogLevel_Info, F("Photo saved to SD card"));
-      } else {
-        log->AddEvent(LogLevel_Error, F("Error saving photo to SD card"));
-      }
+      log->AddEvent(LogLevel_Error, F("Error saving photo to SD card"));
     }
   }
 #endif
@@ -533,8 +740,42 @@ void PrusaConnect::SavePhotoToSdCard() {
  * @param none
  * @return uint8_t - refresh interval
  */
-uint8_t PrusaConnect::GetRefreshInterval() {
+uint16_t PrusaConnect::GetRefreshInterval() {
   return RefreshInterval;
+}
+
+/**
+ * @brief Get the interval for the next upload. Backoff interval after an error, otherwise refresh interval
+ *
+ * @return uint16_t - interval [s]
+ */
+uint16_t PrusaConnect::GetEffectiveInterval() {
+  return (BackoffInterval > RefreshInterval) ? BackoffInterval : RefreshInterval;
+}
+
+/**
+ * @brief Get backoff interval
+ *
+ * @return uint16_t - backoff interval [s]. 0 = no backoff
+ */
+uint16_t PrusaConnect::GetBackoffInterval() {
+  return BackoffInterval;
+}
+
+/**
+ * @brief Get count of consecutive failed connections to the backend
+ *
+ * @return uint16_t - count
+ */
+uint16_t PrusaConnect::GetConnectFailCounter() {
+  return ConnectFailCounter;
+}
+
+/**
+ * @brief Clear count of consecutive failed connections to the backend
+ */
+void PrusaConnect::ClearConnectFailCounter() {
+  ConnectFailCounter = 0;
 }
 
 /**
@@ -544,7 +785,22 @@ uint8_t PrusaConnect::GetRefreshInterval() {
  * @return String - backend received status
  */
 String PrusaConnect::GetBackendReceivedStatus() {
-  return BackendReceivedStatus;
+  xSemaphoreTake(CfgMutex, portMAX_DELAY);
+  String ret = BackendReceivedStatus;
+  xSemaphoreGive(CfgMutex);
+  return ret;
+}
+
+/**
+ * @brief set backend received status. The WEB server task reads it, the photo task writes it
+ *
+ * @param String - status
+ * @return none
+ */
+void PrusaConnect::SetBackendReceivedStatus(String i_data) {
+  xSemaphoreTake(CfgMutex, portMAX_DELAY);
+  BackendReceivedStatus = i_data;
+  xSemaphoreGive(CfgMutex);
 }
 
 /**
@@ -554,7 +810,10 @@ String PrusaConnect::GetBackendReceivedStatus() {
  * @return String - token
  */
 String PrusaConnect::GetToken() {
-  return Token;
+  xSemaphoreTake(CfgMutex, portMAX_DELAY);
+  String ret = Token;
+  xSemaphoreGive(CfgMutex);
+  return ret;
 }
 
 /**
@@ -573,17 +832,10 @@ String PrusaConnect::GetFingerprint() {
  * @return String - hostanme
  */
 String PrusaConnect::GetPrusaConnectHostname() {
-  return PrusaConnectHostname;
-}
-
-/**
- * @brief Get backend availability status
- *
- * @param none
- * @return BackendAvailabilitStatus - backend status
- */
-BackendAvailabilitStatus PrusaConnect::GetBackendAvailabilitStatus() {
-  return BackendAvailability;
+  xSemaphoreTake(CfgMutex, portMAX_DELAY);
+  String ret = PrusaConnectHostname;
+  xSemaphoreGive(CfgMutex);
+  return ret;
 }
 
 /** 
@@ -616,51 +868,84 @@ bool PrusaConnect::GetTimeLapsPhotoSaveStatus() {
 }
 
 /**
+ * @brief Set the camera problem shown in Prusa Connect. The camera information is sent again with the next photo
+ *
+ * @param String - short problem description, empty when everything is OK
+ * @return none
+ */
+void PrusaConnect::SetHealthStatus(String i_data) {
+  if (i_data != HealthStatus) {
+    log->AddEvent(LogLevel_Warning, F("Camera health for Prusa Connect: "), (i_data.length() > 0) ? i_data : String(F("OK")));
+    xSemaphoreTake(CfgMutex, portMAX_DELAY);
+    HealthStatus = i_data;
+    xSemaphoreGive(CfgMutex);
+    SendDeviceInformationToBackend = true;
+  }
+}
+
+uint32_t PrusaConnect::GetUploadOkCount() {
+  return UploadOkCount;
+}
+
+uint32_t PrusaConnect::GetUploadFailedCount() {
+  return UploadFailedCount;
+}
+
+bool PrusaConnect::GetCaptureFailed() {
+  return CaptureFailed;
+}
+
+String PrusaConnect::GetHealthStatus() {
+  xSemaphoreTake(CfgMutex, portMAX_DELAY);
+  String ret = HealthStatus;
+  xSemaphoreGive(CfgMutex);
+  return ret;
+}
+
+/**
  * @brief Increase sending interval counter
  *
  * @param none
  * @return none
  */
 void PrusaConnect::IncreaseSendingIntervalCounter() {
-  SendingIntervalCounter++;
+  if (SendingIntervalCounter < UINT16_MAX) {
+    SendingIntervalCounter++;
+  }
 }
 
 /**
  * @brief Set sending interval counter
  *
- * @param uint8_t i_data - counter
+ * @param uint16_t i_data - counter
  * @return none
  */
-void PrusaConnect::SetSendingIntervalCounter(uint8_t i_data) {
+void PrusaConnect::SetSendingIntervalCounter(uint16_t i_data) {
   SendingIntervalCounter = i_data;
 }
 
+/* called also from the WEB server and the Wi-Fi events: a flag, the counter belongs to the photo task */
 void PrusaConnect::SetSendingIntervalExpired() {
-  SendingIntervalCounter = RefreshInterval;
-}
-
-/**
- * @brief Get sending interval counter
- * 
- * @return uint8_t - counter
- */
-uint8_t PrusaConnect::GetSendingIntervalCounter() {
-  return SendingIntervalCounter;
+  SendNow = true;
 }
 
 /**
  * @brief Check if sending interval is expired. and can I send the data to the backend. [seconds]
  * 
+ * @param uint16_t - interval [s]
  * @return true 
  * @return false 
  */
-bool PrusaConnect::CheckSendingIntervalExpired() {
+bool PrusaConnect::CheckSendingIntervalExpired(uint16_t i_interval) {
   bool ret = false;
-  if (SendingIntervalCounter >= RefreshInterval) {
+  if (true == SendNow) {
+    SendNow = false;
+    ret = true;
+  } else if (SendingIntervalCounter >= i_interval) {
     ret = true;
   }
 
   return ret;
 }
 
-/* EOF */
+/* EOF */

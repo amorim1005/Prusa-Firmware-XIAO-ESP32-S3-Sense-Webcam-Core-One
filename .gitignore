@@ -68,3 +68,9 @@ Temporary Items
 
 # End of https://www.toptal.com/developers/gitignore/api/c++,macos
 
+
+# local build output (build_xiao.sh)
+build/
+
+# Python cache of the tests
+__pycache__/

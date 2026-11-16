@@ -45,56 +45,6 @@ void Configuration::Init() {
 }
 
 /**
-   @info Read MCU cfg from EEPROM
-   @param none
-   @return none
-*/
-void Configuration::ReadCfg() {
-  Log->AddEvent(LogLevel_Info, F("Load CFG from EEPROM"));
-  LoadRefreshInterval();
-  LoadToken();
-  LoadFingerprint();
-  LoadPhotoQuality();
-  LoadFrameSize();
-  LoadBrightness();
-  LoadContrast();
-  LoadSaturation();
-  LoadHmirror();
-  LoadVflip();
-  LoadLensCorrect();
-  LoadExposureCtrl();
-  LoadAwb();
-  LoadAwbGain();
-  LoadAwbMode();
-  LoadBpc();
-  LoadWpc();
-  LoadRawGama();
-  LoadWifiSsid();
-  LoadWifiPassowrd();
-  LoadBasicAuthUsername();
-  LoadBasicAuthPassword();
-  LoadBasicAuthFlag();
-  LoadCameraFlashEnable();
-  LoadCameraFlashTime();
-  LoadMdnsRecord();
-  LoadAec2();
-  LoadAeLevel();
-  LoadAecValue();
-  LoadGainCtrl();
-  LoadAgcGain();
-  LoadPrusaConnectHostname();
-  LoadNetworkIpMethod();
-  LoadNetworkIp();
-  LoadNetworkMask();
-  LoadNetworkGateway();
-  LoadNetworkDns();
-  LoadCameraImageExifRotation();
-  LoadTimeLapseFunctionStatus();
-  Log->AddEvent(LogLevel_Info, F("Active WiFi client cfg: "), String(CheckActifeWifiCfgFlag() ? "true" : "false"));
-  Log->AddEvent(LogLevel_Info, F("Load CFG from EEPROM done"));
-}
-
-/**
    @info Function for check if it's first MCU start
    @param none
    @return bool - status
@@ -158,8 +108,6 @@ void Configuration::DefaultCfg() {
   SaveBasicAuthUsername(FACTORY_CFG_WEB_AUTH_USERNAME);
   SaveBasicAuthPassword(FACTORY_CFG_WEB_AUTH_PASSWORD);
   SaveBasicAuthFlag(FACTORY_CFG_WEB_AUTH_ENABLE);
-  SaveCameraFlashEnable(FACTORY_CFG_CAMERA_FLASH_ENABLE);
-  SaveCameraFlashTime(FACTORY_CFG_CAMERA_FLASH_TIME);
   SaveMdnsRecord(FACTORY_CFG_MDNS_RECORD_HOST);
   SaveAec2(FACTORY_CFG_AEC2);
   SaveAeLevel(FACTORY_CFG_AE_LEVEL);
@@ -175,8 +123,16 @@ void Configuration::DefaultCfg() {
   SaveNetworkDns(FACTORY_CFG_NETWORK_STATIC_DNS);
   SaveCameraImageExifRotation(FACTORY_CFG_IMAGE_EXIF_ROTATION);
   SaveTimeLapseFunctionStatus(FACTORY_CFG_TIMELAPS_ENABLE);
-  SaveExternalTemperatureSensorEnable(FACTORY_CFG_ENABLE_EXT_SENSOR);
-  SaveExternalTemperatureSensorUnit(FACTORY_CFG_EXT_SENSOR_UNIT);
+  SavePrusaLinkEnable(FACTORY_CFG_PRUSALINK_ENABLE);
+  SavePrusaLinkHost(FACTORY_CFG_PRUSALINK_HOST);
+  SavePrusaLinkUser(FACTORY_CFG_PRUSALINK_USER);
+  SavePrusaLinkPassword(FACTORY_CFG_PRUSALINK_PASSWORD);
+  SaveUnplannedRestarts(0);
+  SaveStatusLedMode(FACTORY_CFG_STATUS_LED_MODE);
+  SaveWifiEapEnable(FACTORY_CFG_WIFI_EAP_ENABLE);
+  SaveWifiEapIdentity(FACTORY_CFG_WIFI_EAP_IDENTITY);
+  SaveWifiEapUsername(FACTORY_CFG_WIFI_EAP_USERNAME);
+  SaveWifiEapPassword(FACTORY_CFG_WIFI_EAP_PASSWORD);
   Log->AddEvent(LogLevel_Warning, F("+++++++++++++++++++++++++++"));
 }
 
@@ -432,13 +388,14 @@ String Configuration::LoadIpAddress(uint16_t address) {
 }
 
 /**
-   @info save refresh interval to eeprom
-   @param uint8_t - refresh interval
+   @info save refresh interval to eeprom. 10/30/60 s are stored as seconds, 10 min is stored as REFRESH_INTERVAL_TEN_MIN_EEPROM
+   @param uint16_t - refresh interval [s]
    @return none
 */
-void Configuration::SaveRefreshInterval(uint8_t i_interval) {
+void Configuration::SaveRefreshInterval(uint16_t i_interval) {
   Log->AddEvent(LogLevel_Verbose, F("Save RefreshInterval: "), String(i_interval));
-  SaveUint8(EEPROM_ADDR_REFRESH_INTERVAL_START, i_interval);
+  uint8_t value = (i_interval >= REFRESH_INTERVAL_TEN_MIN) ? REFRESH_INTERVAL_TEN_MIN_EEPROM : (uint8_t)i_interval;
+  SaveUint8(EEPROM_ADDR_REFRESH_INTERVAL_START, value);
 }
 
 /**
@@ -447,7 +404,8 @@ void Configuration::SaveRefreshInterval(uint8_t i_interval) {
    @return none
 */
 void Configuration::SaveToken(String i_token) {
-  Log->AddEvent(LogLevel_Verbose, F("Save Token["), String(i_token.length()) + "]: " + i_token);
+  /* the token is a secret, never write it to the log (the log is stored on the SD card) */
+  Log->AddEvent(LogLevel_Verbose, F("Save Token, length: "), String(i_token.length()));
   SaveString(EEPROM_ADDR_TOKEN_START, EEPROM_ADDR_TOKEN_LENGTH, i_token);
 }
 
@@ -684,26 +642,6 @@ void Configuration::SaveBasicAuthFlag(bool i_data) {
 }
 
 /**
-   @info save status enable/disable photo flash to EEPROM
-   @param bool - status
-   @return none
-*/
-void Configuration::SaveCameraFlashEnable(uint8_t i_data) {
-  Log->AddEvent(LogLevel_Verbose, F("Save Enable/disable camera flash: "), String(i_data));
-  SaveUint8(EEPROM_ADDR_CAMERA_FLASH_ENABLE_START, i_data);
-}
-
-/**
-   @info save time for photo flash to EEPROM
-   @param bool - status
-   @return none
-*/
-void Configuration::SaveCameraFlashTime(uint16_t i_data) {
-  Log->AddEvent(LogLevel_Verbose, F("Save camera flash time: "), String(i_data));
-  SaveUint16(EEPROM_ADDR_CAMERA_FLASH_TIME_START, i_data);
-}
-
-/**
    @info Save mdns record
    @param String - value
    @return none
@@ -789,7 +727,7 @@ void Configuration::SavePrusaConnectHostname(String i_data) {
    @return none
 */
 void Configuration::SaveNetworkIpMethod(uint8_t i_data) {
-  Log->AddEvent(LogLevel_Verbose, "Save network ip method: " + (i_data == 0) ? "DHCP" : "Static");
+  Log->AddEvent(LogLevel_Verbose, F("Save network ip method: "), String((i_data == 0) ? "DHCP" : "Static"));
   SaveUint8(EEPROM_ADDR_NETWORK_IP_METHOD_START, i_data);
 }
 
@@ -855,32 +793,94 @@ void Configuration::SaveTimeLapseFunctionStatus(bool i_data) {
 }
 
 /**
-   @info Save external temperature sensor enable
-   @param bool - value
+   @info save PrusaLink enable flag
+   @param bool - enable
    @return none
 */
-void Configuration::SaveExternalTemperatureSensorEnable(bool i_data) {
-  Log->AddEvent(LogLevel_Verbose, F("Save external temperature sensor enable: "), String(i_data)); 
-  SaveBool(EEPROM_ADDR_EXT_SENS_ENABLE_START, i_data);
+void Configuration::SavePrusaLinkEnable(bool i_data) {
+  Log->AddEvent(LogLevel_Verbose, F("Save PrusaLink enable: "), String(i_data));
+  SaveBool(EEPROM_ADDR_PRUSALINK_ENABLE_START, i_data);
 }
 
 /**
-   @info Save external temperature sensor unit
-   @param uint8_t - value
+   @info save PrusaLink printer hostname or IP address
+   @param String - hostname
    @return none
 */
-void Configuration::SaveExternalTemperatureSensorUnit(uint8_t i_data) {
-  Log->AddEvent(LogLevel_Verbose, F("Save external temperature sensor unit: "), String(i_data)); 
-  SaveUint8(EEPROM_ADDR_EXT_SENS_UNIT_START, i_data);
+void Configuration::SavePrusaLinkHost(String i_data) {
+  Log->AddEvent(LogLevel_Verbose, F("Save PrusaLink host: "), i_data);
+  SaveString(EEPROM_ADDR_PRUSALINK_HOST_START, EEPROM_ADDR_PRUSALINK_HOST_LENGTH, i_data);
+}
+
+/**
+   @info save PrusaLink user name
+   @param String - user name
+   @return none
+*/
+void Configuration::SavePrusaLinkUser(String i_data) {
+  Log->AddEvent(LogLevel_Verbose, F("Save PrusaLink user: "), i_data);
+  SaveString(EEPROM_ADDR_PRUSALINK_USER_START, EEPROM_ADDR_PRUSALINK_USER_LENGTH, i_data);
+}
+
+/**
+   @info save PrusaLink password
+   @param String - password
+   @return none
+*/
+void Configuration::SavePrusaLinkPassword(String i_data) {
+  Log->AddEvent(LogLevel_Verbose, F("Save PrusaLink password, length: "), String(i_data.length()));
+  SaveString(EEPROM_ADDR_PRUSALINK_PASSWORD_START, EEPROM_ADDR_PRUSALINK_PASSWORD_LENGTH, i_data);
+}
+
+/**
+   @info save the detected camera sensor
+   @param uint8_t - CAMERA_SENSOR_xxx
+   @return none
+*/
+void Configuration::SaveCameraSensor(uint8_t i_data) {
+  Log->AddEvent(LogLevel_Verbose, F("Save camera sensor: "), String(i_data));
+  SaveUint8(EEPROM_ADDR_CAMERA_SENSOR_START, i_data);
+}
+
+/**
+   @info save the count of unplanned restarts
+   @param uint16_t - count
+   @return none
+*/
+void Configuration::SaveUnplannedRestarts(uint16_t i_data) {
+  Log->AddEvent(LogLevel_Verbose, F("Save unplanned restarts: "), String(i_data));
+  SaveUint16(EEPROM_ADDR_UNPLANNED_RESTARTS_START, i_data);
+}
+
+/**
+   @info save the status LED mode
+   @param uint8_t - STATUS_LED_MODE_xxx
+   @return none
+*/
+void Configuration::SaveStatusLedMode(uint8_t i_data) {
+  Log->AddEvent(LogLevel_Verbose, F("Save status LED mode: "), String(i_data));
+  SaveUint8(EEPROM_ADDR_STATUS_LED_MODE_START, i_data);
 }
 
 /**
    @info load refresh interval from eeprom 
    @param none
-   @return uint8_t - refresh interval
+   @return uint16_t - refresh interval [s]. Always one of the Camera Service trigger schemes 10 s, 30 s, 60 s, 10 min
 */
-uint8_t Configuration::LoadRefreshInterval() {
-  uint8_t ret = EEPROM.read(EEPROM_ADDR_REFRESH_INTERVAL_START);
+uint16_t Configuration::LoadRefreshInterval() {
+  uint8_t value = EEPROM.read(EEPROM_ADDR_REFRESH_INTERVAL_START);
+  uint16_t ret = REFRESH_INTERVAL_THIRTY_SEC;
+
+  /* older firmware stored any value 10-240 s. Use the nearest trigger scheme */
+  if (REFRESH_INTERVAL_TEN_MIN_EEPROM == value) {
+    ret = REFRESH_INTERVAL_TEN_MIN;
+  } else if (value <= 20) {
+    ret = REFRESH_INTERVAL_TEN_SEC;
+  } else if (value <= 45) {
+    ret = REFRESH_INTERVAL_THIRTY_SEC;
+  } else {
+    ret = REFRESH_INTERVAL_SIXTY_SEC;
+  }
   Log->AddEvent(LogLevel_Info, F("Refresh interval: "), String(ret));
 
   return ret;
@@ -1167,30 +1167,6 @@ bool Configuration::LoadBasicAuthFlag() {
 }
 
 /**
-   @info Load flag for enable/disable flash from eeprom
-   @param none
-   @return bool - status
-*/
-bool Configuration::LoadCameraFlashEnable() {
-  bool ret = EEPROM.read(EEPROM_ADDR_CAMERA_FLASH_ENABLE_START);
-  Log->AddEvent(LogLevel_Info, F("Camera flash: "), String(ret));
-
-  return ret;
-}
-
-/**
-   @info Load time for photo flash
-   @param none
-   @return uint16_t - time
-*/
-uint16_t Configuration::LoadCameraFlashTime() {
-  uint16_t ret = LoadUint16(EEPROM_ADDR_CAMERA_FLASH_TIME_START);
-  Log->AddEvent(LogLevel_Info, F("Camera flash time: "), String(ret));
-
-  return ret;
-}
-
-/**
    @info Load mdns record
    @param none
    @return String - mDNS record
@@ -1386,36 +1362,165 @@ bool Configuration::LoadTimeLapseFunctionStatus() {
 }
 
 /**
- * @brief Load external temperature sensor enable
- * 
- * @return bool - status
+ * @brief Load PrusaLink enable flag. After a firmware upgrade the EEPROM cell is 0xFF, it means disabled
+ *
+ * @return bool - enable
  */
-bool Configuration::LoadExternalTemperatureSensorEnable() {
-  uint8_t ret = EEPROM.read(EEPROM_ADDR_EXT_SENS_ENABLE_START);
-  Log->AddEvent(LogLevel_Info, F("External temperature sensor enable: "), String(ret));
+bool Configuration::LoadPrusaLinkEnable() {
+  bool ret = (EEPROM.read(EEPROM_ADDR_PRUSALINK_ENABLE_START) == 1);
+  Log->AddEvent(LogLevel_Info, F("PrusaLink enable: "), String(ret));
 
-  if (ret == 255) {
-    ret = 0;
-  }
-
-  return (bool) ret;
+  return ret;
 }
 
 /**
- * @brief Load external temperature sensor unit
- * 
- * @return uint8_t - unit
+ * @brief Load PrusaLink printer hostname or IP address
+ *
+ * @return String - hostname
  */
-uint8_t Configuration::LoadExternalTemperatureSensorUnit() {
-  uint8_t ret = EEPROM.read(EEPROM_ADDR_EXT_SENS_UNIT_START);
-  Log->AddEvent(LogLevel_Info, F("External temperature sensor unit: "), String(ret));
+String Configuration::LoadPrusaLinkHost() {
+  Log->AddEvent(LogLevel_Info, F("PrusaLink host: "), false);
+  String ret = LoadString(EEPROM_ADDR_PRUSALINK_HOST_START, EEPROM_ADDR_PRUSALINK_HOST_LENGTH, true);
 
-  if (ret == 255) {
+  return ret;
+}
+
+/**
+ * @brief Load PrusaLink user name
+ *
+ * @return String - user name. Default user name when it is not saved
+ */
+String Configuration::LoadPrusaLinkUser() {
+  Log->AddEvent(LogLevel_Info, F("PrusaLink user: "), false);
+  String ret = LoadString(EEPROM_ADDR_PRUSALINK_USER_START, EEPROM_ADDR_PRUSALINK_USER_LENGTH, true);
+
+  if (ret.length() == 0) {
+    ret = PRUSALINK_DEFAULT_USER;
+  }
+
+  return ret;
+}
+
+/**
+ * @brief Load PrusaLink password
+ *
+ * @return String - password
+ */
+String Configuration::LoadPrusaLinkPassword() {
+  Log->AddEvent(LogLevel_Info, F("PrusaLink password: "), false);
+  String ret = LoadString(EEPROM_ADDR_PRUSALINK_PASSWORD_START, EEPROM_ADDR_PRUSALINK_PASSWORD_LENGTH, false);
+
+  return ret;
+}
+
+/**
+ * @brief Load the camera sensor detected on a previous start. After a firmware upgrade the EEPROM cell is 0xFF, it means unknown
+ *
+ * @return uint8_t - CAMERA_SENSOR_xxx
+ */
+uint8_t Configuration::LoadCameraSensor() {
+  uint8_t ret = EEPROM.read(EEPROM_ADDR_CAMERA_SENSOR_START);
+  if (ret > CAMERA_SENSOR_OV5640) {
+    ret = CAMERA_SENSOR_UNKNOWN;
+  }
+  Log->AddEvent(LogLevel_Info, F("Saved camera sensor: "), String(ret));
+
+  return ret;
+}
+
+/**
+ * @brief Load the count of unplanned restarts. After a firmware upgrade the EEPROM cells are 0xFF, it means 0
+ *
+ * @return uint16_t - count
+ */
+uint16_t Configuration::LoadUnplannedRestarts() {
+  uint16_t ret = LoadUint16(EEPROM_ADDR_UNPLANNED_RESTARTS_START);
+  if (0xFFFF == ret) {
     ret = 0;
   }
 
   return ret;
-
 }
 
-/* EOF */
+/**
+   @info save Wi-Fi Enterprise (PEAP) enable
+   @param bool - true = enabled
+   @return none
+*/
+void Configuration::SaveWifiEapEnable(bool i_data) {
+  Log->AddEvent(LogLevel_Verbose, F("Save Wi-Fi Enterprise enable: "), String(i_data));
+  SaveUint8(EEPROM_ADDR_WIFI_EAP_ENABLE_START, (true == i_data) ? 1 : 0);
+}
+
+/**
+   @info save Wi-Fi Enterprise anonymous identity
+   @param String - identity
+   @return none
+*/
+void Configuration::SaveWifiEapIdentity(String i_data) {
+  Log->AddEvent(LogLevel_Verbose, F("Save Wi-Fi Enterprise identity["), String(i_data.length()) + "]: " + i_data);
+  SaveString(EEPROM_ADDR_WIFI_EAP_IDENTITY_START, EEPROM_ADDR_WIFI_EAP_IDENTITY_LENGTH, i_data);
+}
+
+/**
+   @info save Wi-Fi Enterprise user name
+   @param String - user name
+   @return none
+*/
+void Configuration::SaveWifiEapUsername(String i_data) {
+  Log->AddEvent(LogLevel_Verbose, F("Save Wi-Fi Enterprise user name["), String(i_data.length()) + "]: " + i_data);
+  SaveString(EEPROM_ADDR_WIFI_EAP_USERNAME_START, EEPROM_ADDR_WIFI_EAP_USERNAME_LENGTH, i_data);
+}
+
+/**
+   @info save Wi-Fi Enterprise password
+   @param String - password
+   @return none
+*/
+void Configuration::SaveWifiEapPassword(String i_data) {
+  Log->AddEvent(LogLevel_Verbose, F("Save Wi-Fi Enterprise password["), String(i_data.length()) + "]"); /* SENSITIVE DATA! */
+  SaveString(EEPROM_ADDR_WIFI_EAP_PASSWORD_START, EEPROM_ADDR_WIFI_EAP_PASSWORD_LENGTH, i_data);
+}
+
+/**
+   @info load Wi-Fi Enterprise (PEAP) enable. Only 1 is enabled, a new byte after a firmware update (0 or 255) is disabled
+   @param none
+   @return bool - true = enabled
+*/
+bool Configuration::LoadWifiEapEnable() {
+  bool ret = (1 == EEPROM.read(EEPROM_ADDR_WIFI_EAP_ENABLE_START));
+  Log->AddEvent(LogLevel_Info, F("Wi-Fi Enterprise enable: "), String(ret));
+  return ret;
+}
+
+/**
+   @info load Wi-Fi Enterprise anonymous identity
+   @param none
+   @return String - identity
+*/
+String Configuration::LoadWifiEapIdentity() {
+  Log->AddEvent(LogLevel_Info, F("Wi-Fi Enterprise identity: "), false);
+  return LoadString(EEPROM_ADDR_WIFI_EAP_IDENTITY_START, EEPROM_ADDR_WIFI_EAP_IDENTITY_LENGTH, true);
+}
+
+/**
+   @info load Wi-Fi Enterprise user name
+   @param none
+   @return String - user name
+*/
+String Configuration::LoadWifiEapUsername() {
+  Log->AddEvent(LogLevel_Info, F("Wi-Fi Enterprise user name: "), false);
+  return LoadString(EEPROM_ADDR_WIFI_EAP_USERNAME_START, EEPROM_ADDR_WIFI_EAP_USERNAME_LENGTH, true);
+}
+
+/**
+   @info load Wi-Fi Enterprise password
+   @param none
+   @return String - password
+*/
+String Configuration::LoadWifiEapPassword() {
+  Log->AddEvent(LogLevel_Info, F("Wi-Fi Enterprise password: "), false);
+  return LoadString(EEPROM_ADDR_WIFI_EAP_PASSWORD_START, EEPROM_ADDR_WIFI_EAP_PASSWORD_LENGTH, CONSOLE_VERBOSE_DEBUG);
+}
+
+/* EOF */

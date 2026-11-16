@@ -13,41 +13,55 @@
 */
 #include "camera.h"
 
-Camera SystemCamera(&SystemConfig, &SystemLog, FLASH_GPIO_NUM);
+Camera SystemCamera(&SystemConfig, &SystemLog);
 
 /**
    @brief Init camera constructor
    @param Configuration* - pointer to Configuration class
    @param Logs* - pointer to Logs class
-   @param uint8_t - flash pin
    @return none
 */
-Camera::Camera(Configuration* i_conf, Logs* i_log, int8_t i_FlashPin) {
+Camera::Camera(Configuration* i_conf, Logs* i_log) {
   config = i_conf;
   log = i_log;
 
-  CameraFlashPin = i_FlashPin;
   StreamOnOff = false;
   frameBufferSemaphore = xSemaphoreCreateMutex();
+  streamMutex = xSemaphoreCreateMutex();
+  savedPhotoMutex = xSemaphoreCreateMutex();
+  SavedPhotoBuf = NULL;
+  SavedPhotoLen = 0;
+  SavedPhotoCapacity = 0;
 
-  /* Allocate memory for the frame buffer */
-  FrameBufferDuplicate = (camera_fb_t*)heap_caps_malloc(sizeof(camera_fb_t), MALLOC_CAP_SPIRAM);
-  if (FrameBufferDuplicate != NULL) {
-    memset(FrameBufferDuplicate, 0, sizeof(camera_fb_t)); 
-    FrameBufferDuplicate->buf = NULL;
+  /* stream buffers are allocated by the capture task, when a stream client connects */
+  for (uint8_t i = 0; i < CAMERA_STREAM_BUFFERS; i++) {
+    StreamBuf[i] = NULL;
+    StreamBufLen[i] = 0;
+    StreamBufCapacity[i] = 0;
+    StreamBufReaders[i] = 0;
   }
-  /* Allocate memory for the frame buffer */
-  FrameBufferExif = (camera_fb_t*)heap_caps_malloc(sizeof(camera_fb_t), MALLOC_CAP_SPIRAM);
-  if (FrameBufferExif != NULL) {
-    memset(FrameBufferExif, 0, sizeof(camera_fb_t)); 
-    FrameBufferExif->buf = NULL;
-  }
-  StreamSendingPhoto = false;
+  StreamLatest = -1;
+  StreamLatestConsumed = false;
+  StreamLatestTime = 0;
+  StreamFrameSeq = 0;
+  StreamClients = 0;
+  StreamTask = NULL;
+  LastPhotoSize = 0;
+  LastPhotoFrameSize = 0;
+  LastPhotoQuality = 0;
+  FrameBuffer = NULL;
+  CameraCaptureSuccess = false;
+  sensor = NULL;
+  CameraType = (camera_pid_t)0;
+  CameraName = F("Unknown");
+  SensorMaxFrameSize = CAMERA_UNKNOWN_SENSOR_MAX_FRAMESIZE;
+  afMutex = xSemaphoreCreateMutex();
+  AutofocusStatus = F("Not supported by the camera sensor");
+  AutofocusReady = false;
 
   PhotoExifData.header = NULL;
   PhotoExifData.len = 0;
   PhotoExifData.offset = 0;
-  PhotoSending = false;
   CameraCaptureFailedCounter = 0;
 }
 
@@ -59,21 +73,126 @@ Camera::Camera(Configuration* i_conf, Logs* i_log, int8_t i_FlashPin) {
 void Camera::Init() {
   log->AddEvent(LogLevel_Info, F("Init camera lib"));
 
-#if (true == ENABLE_CAMERA_FLASH)
-  log->AddEvent(LogLevel_Info, F("Init GPIO"));
-#if (true == CAMERA_FLASH_PWM_CTRL)
-  ledcAttach(FLASH_GPIO_NUM, FLASH_PWM_FREQ, FLASH_PWM_RESOLUTION);
-
-#elif (true == CAMERA_FLASH_DIGITAL_CTRL)
-  pinMode(FLASH_GPIO_NUM, OUTPUT);
-  digitalWrite(FLASH_GPIO_NUM, LOW);
-#endif
-  SetFlashStatus(false);
-#endif
-
-  InitCameraModule();
-  ApplyCameraCfg();
+  /* Init with the sensor saved on a previous start (XCLK and frame size limit). The driver reads the sensor ID
+     on every init anyway, so the saved sensor is always checked. A frame size above the sensor maximum
+     is limited by the driver, a wrong saved sensor cannot cause a failed init */
+  camera_pid_t SavedType = CameraType;
+  if ((camera_pid_t)0 != SavedType) {
+    CheckFrameSizeLimit();
+  }
+  InitCameraModule(TFrameSize);
   GetCameraModel();
+  CheckFrameSizeLimit();
+
+  if (TransformPidToCameraSensor(CameraType) != TransformPidToCameraSensor(SavedType)) {
+    /* first start, or the camera module was changed: save the sensor, the next start needs only one init */
+    log->AddEvent(LogLevel_Warning, "New camera sensor detected: " + CameraName);
+    config->SaveCameraSensor(TransformPidToCameraSensor(CameraType));
+
+    if (GetSensorXclk() != (uint32_t)CameraConfig.xclk_freq_hz) {
+      log->AddEvent(LogLevel_Info, F("Init camera module again with the XCLK of the detected sensor"));
+      esp_camera_deinit();
+      delay(100);
+      InitCameraModule(TFrameSize);
+    }
+  }
+
+  ApplyCameraCfg();
+  InitAutofocus();
+}
+
+/**
+   @brief Load the autofocus firmware to the OV5640 and start continuous autofocus.
+          The sensor loses the firmware on every camera init, so it is loaded after every init.
+          OV2640 and OV3660 have a fixed focus lens.
+   @param none
+   @return none
+*/
+void Camera::InitAutofocus() {
+  AutofocusReady = false;
+  if ((OV5640_PID != CameraType) || (sensor == NULL)) {
+    SetAutofocusStatus(F("Not supported by the camera sensor"));
+    return;
+  }
+
+  /* the library checks the chip ID, an OV5640 module without the focus motor has the same ID */
+  if (false == Ov5640Autofocus.start(sensor)) {
+    SetAutofocusStatus(F("Failed: OV5640 not found"));
+    log->AddEvent(LogLevel_Error, GetAutofocusText());
+    return;
+  }
+
+  log->AddEvent(LogLevel_Info, F("Load OV5640 autofocus firmware"));
+  uint32_t start = millis();
+  uint8_t ret = Ov5640Autofocus.focusInit();
+  if (0 != ret) {
+    SetAutofocusStatus("Failed: autofocus firmware not started (" + String(ret) + ")");
+    log->AddEvent(LogLevel_Error, GetAutofocusText());
+    return;
+  }
+
+  ret = Ov5640Autofocus.autoFocusMode();
+  if (0 != ret) {
+    SetAutofocusStatus("Failed: continuous autofocus not started (" + String(ret) + ")");
+    log->AddEvent(LogLevel_Error, GetAutofocusText());
+    return;
+  }
+
+  SetAutofocusStatus(F("Continuous autofocus"));
+  AutofocusReady = true;
+  log->AddEvent(LogLevel_Info, "OV5640 continuous autofocus started in " + String(millis() - start) + " ms");
+}
+
+/**
+   @brief Set the autofocus status text, shared between the WEB server and the photo task
+   @param String - status
+   @return none
+*/
+void Camera::SetAutofocusStatus(String i_status) {
+  xSemaphoreTake(afMutex, portMAX_DELAY);
+  AutofocusStatus = i_status;
+  xSemaphoreGive(afMutex);
+}
+
+/**
+   @brief Copy of the autofocus status text
+   @param none
+   @return String - status
+*/
+String Camera::GetAutofocusText() {
+  xSemaphoreTake(afMutex, portMAX_DELAY);
+  String ret = AutofocusStatus;
+  xSemaphoreGive(afMutex);
+  return ret;
+}
+
+/**
+   @brief Get autofocus status for the WEB page. Reads the focus state from the OV5640
+   @param none
+   @return String - status
+*/
+String Camera::GetAutofocusStatus() {
+  if ((OV5640_PID != CameraType) || (false == AutofocusReady)) {
+    return GetAutofocusText();
+  }
+
+  /* the sensor must not be read during a camera reinit. When the camera is busy, return the last status */
+  if (!xSemaphoreTake(frameBufferSemaphore, pdMS_TO_TICKS(100))) {
+    return GetAutofocusText();
+  }
+
+  /* FW_STATUS: 0x10 focused, 0x00-0x0F and 0x80-0x8F focusing, 0x70 idle */
+  uint8_t state = Ov5640Autofocus.getFWStatus();
+  xSemaphoreGive(frameBufferSemaphore);
+  String ret = GetAutofocusText();
+  if (FW_STATUS_S_FOCUSED == state) {
+    ret += F(" - focused");
+  } else if ((state <= 0x0F) || ((state >= 0x80) && (state <= 0x8F))) {
+    ret += F(" - focusing");
+  } else if (FW_STATUS_S_IDLE == state) {
+    ret += F(" - idle");
+  }
+  return ret;
 }
 
 /**
@@ -82,6 +201,15 @@ void Camera::Init() {
    @return none
 */
 void Camera::InitCameraModule() {
+  InitCameraModule(TFrameSize);
+}
+
+/**
+   @brief Init the camera module with a frame size
+   @param framesize_t - frame size
+   @return none
+*/
+void Camera::InitCameraModule(framesize_t i_frameSize) {
   log->AddEvent(LogLevel_Info, F("Init camera module"));
   /* Turn-off the 'brownout detector' */
 #if (true == ENABLE_BROWN_OUT_DETECTION)
@@ -107,7 +235,7 @@ void Camera::InitCameraModule() {
   CameraConfig.pin_sccb_scl = SIOC_GPIO_NUM;
   CameraConfig.pin_pwdn = PWDN_GPIO_NUM;
   CameraConfig.pin_reset = RESET_GPIO_NUM;
-  CameraConfig.xclk_freq_hz = 15000000;       // or 3000000; 16500000; 20000000
+  CameraConfig.xclk_freq_hz = GetSensorXclk();
   CameraConfig.pixel_format = PIXFORMAT_JPEG; /* YUV422,GRAYSCALE,RGB565,JPEG */
 
   /* OV2640
@@ -123,8 +251,9 @@ void Camera::InitCameraModule() {
     CAMERA_GRAB_LATEST     - Except when 1 frame buffer is used, queue will always contain the last 'fb_count' frames
   */
 
-  CameraConfig.frame_size = TFrameSize;             /* FRAMESIZE_ + QVGA|CIF|VGA|SVGA|XGA|SXGA|UXGA */
+  CameraConfig.frame_size = i_frameSize;            /* FRAMESIZE_ + QVGA|CIF|VGA|SVGA|XGA|SXGA|UXGA|HD|FHD|QXGA|5MP */
   CameraConfig.jpeg_quality = PhotoQuality;         /* 10-63 lower number means higher quality */
+  CameraConfig.jpeg_buffer_size = 0;                /* 0 = driver default, width * height / 5 */
   CameraConfig.fb_count = 1;                        /* picture frame buffer alocation */
   CameraConfig.grab_mode = CAMERA_GRAB_LATEST;      /* CAMERA_GRAB_WHEN_EMPTY or CAMERA_GRAB_LATEST */
 #if (true == ENABLE_PSRAM)
@@ -146,8 +275,9 @@ void Camera::InitCameraModule() {
   if (err != ESP_OK) {
     log->AddEvent(LogLevel_Warning, F("Camera init failed. Error: "), String(err, HEX));
     log->AddEvent(LogLevel_Warning, F("Reset ESP32-cam!"));
-    ESP.restart();
-  } 
+    System_RestartMcu(SystemRestart_CameraInit);
+  }
+  sensor = esp_camera_sensor_get();
 }
 
 /**
@@ -178,10 +308,75 @@ void Camera::LoadCameraCfgFromEeprom() {
   vflip = config->LoadVflip();
   lensc = config->LoadLensCorrect();
   exposure_ctrl = config->LoadExposureCtrl();
-  CameraFlashEnable = config->LoadCameraFlashEnable();
-  CameraFlashTime = config->LoadCameraFlashTime();
   imageExifRotation = config->LoadCameraImageExifRotation();
+
+  /* sensor detected on a previous start */
+  CameraType = TransformCameraSensorToPid(config->LoadCameraSensor());
+  if ((camera_pid_t)0 != CameraType) {
+    sensor_id_t id = {};
+    id.PID = CameraType;
+    camera_sensor_info_t* info = esp_camera_sensor_get_info(&id);
+    if (info != NULL) {
+      CameraName = info->name;
+      SensorMaxFrameSize = info->max_size;
+    }
+  }
 }
+
+/**
+   @brief Translate the saved camera sensor code to the sensor PID
+   @param uint8_t - CAMERA_SENSOR_xxx
+   @return camera_pid_t - PID, 0 when unknown
+*/
+camera_pid_t Camera::TransformCameraSensorToPid(uint8_t i_data) {
+  switch (i_data) {
+    case CAMERA_SENSOR_OV2640:
+      return OV2640_PID;
+    case CAMERA_SENSOR_OV3660:
+      return OV3660_PID;
+    case CAMERA_SENSOR_OV5640:
+      return OV5640_PID;
+    default:
+      return (camera_pid_t)0;
+  }
+}
+
+/**
+   @brief Translate the sensor PID to the camera sensor code saved in the EEPROM
+   @param camera_pid_t - PID
+   @return uint8_t - CAMERA_SENSOR_xxx, CAMERA_SENSOR_UNKNOWN for other sensors
+*/
+uint8_t Camera::TransformPidToCameraSensor(camera_pid_t i_data) {
+  switch (i_data) {
+    case OV2640_PID:
+      return CAMERA_SENSOR_OV2640;
+    case OV3660_PID:
+      return CAMERA_SENSOR_OV3660;
+    case OV5640_PID:
+      return CAMERA_SENSOR_OV5640;
+    default:
+      return CAMERA_SENSOR_UNKNOWN;
+  }
+}
+
+/**
+   @brief Frame sizes selectable on the WEB page. The index is saved in the EEPROM, never change the order, only append.
+          The sensor decides which frame sizes are available: OV2640 up to UXGA, OV3660 up to QXGA, OV5640 up to 5MP
+*/
+static const framesize_t FrameSizeTable[] = {
+  FRAMESIZE_QVGA,   /* 0 - 320x240 */
+  FRAMESIZE_CIF,    /* 1 - 400x296 */
+  FRAMESIZE_VGA,    /* 2 - 640x480 */
+  FRAMESIZE_SVGA,   /* 3 - 800x600 */
+  FRAMESIZE_XGA,    /* 4 - 1024x768 */
+  FRAMESIZE_SXGA,   /* 5 - 1280x1024 */
+  FRAMESIZE_UXGA,   /* 6 - 1600x1200 */
+  FRAMESIZE_HD,     /* 7 - 1280x720 */
+  FRAMESIZE_FHD,    /* 8 - 1920x1080 */
+  FRAMESIZE_QXGA,   /* 9 - 2048x1536 */
+  FRAMESIZE_5MP,    /* 10 - 2592x1944 */
+};
+static const uint8_t FrameSizeTableCount = sizeof(FrameSizeTable) / sizeof(FrameSizeTable[0]);
 
 /**
    @brief transform uint8_t from web interface to framesize_t
@@ -189,105 +384,93 @@ void Camera::LoadCameraCfgFromEeprom() {
    @return framesize_t
 */
 framesize_t Camera::TransformFrameSizeDataType(uint8_t i_data) {
-  framesize_t ret = FRAMESIZE_QVGA;
-  switch (i_data) {
-    case 0:
-      ret = FRAMESIZE_QVGA;
-      break;
-    case 1:
-      ret = FRAMESIZE_CIF;
-      break;
-    case 2:
-      ret = FRAMESIZE_VGA;
-      break;
-    case 3:
-      ret = FRAMESIZE_SVGA;
-      break;
-    case 4:
-      ret = FRAMESIZE_XGA;
-      break;
-    case 5:
-      ret = FRAMESIZE_SXGA;
-      break;
-    case 6:
-      ret = FRAMESIZE_UXGA;
-      break;
-    default:
-      ret = FRAMESIZE_QVGA;
-      log->AddEvent(LogLevel_Warning, F("Bad frame size. Set default value. "), String(i_data));
-      break;
+  if (i_data < FrameSizeTableCount) {
+    return FrameSizeTable[i_data];
+  }
+
+  log->AddEvent(LogLevel_Warning, F("Bad frame size. Set default value. "), String(i_data));
+  return FrameSizeTable[CAMERA_MIN_FRAMESIZE_INDEX];
+}
+
+/**
+   @brief Check if the frame size is offered and the detected sensor supports it
+   @param uint8_t - frame size index from web
+   @return bool - true if supported
+*/
+bool Camera::CheckFrameSizeSupported(uint8_t i_data) {
+  return ((i_data >= CAMERA_MIN_FRAMESIZE_INDEX) && (i_data < FrameSizeTableCount) && (FrameSizeTable[i_data] <= SensorMaxFrameSize));
+}
+
+/**
+   @brief List of frame size indexes supported by the detected sensor, for the WEB page
+   @param none
+   @return String - comma separated indexes, for example "4,5,6,7,8"
+*/
+String Camera::GetSupportedFrameSizes() {
+  String ret = "";
+  for (uint8_t i = 0; i < FrameSizeTableCount; i++) {
+    if (CheckFrameSizeSupported(i)) {
+      if (ret.length() > 0) {
+        ret += ",";
+      }
+      ret += String(i);
+    }
   }
 
   return ret;
 }
 
 /**
-   @brief Function set photo sending status
-   @param bool i_data - true = on, false = off
-   @return none
-*/
-void Camera::SetPhotoSending(bool i_data) {
-  PhotoSending = i_data;
-}
-
-/**
-   @brief Function set flash status
-   @param bool i_data - true = on, false = off
-   @return none
-*/
-void Camera::SetFlashStatus(bool i_data) {
-#if (true == ENABLE_CAMERA_FLASH)
-/* PWM control of the FLASH */
-#if (true == CAMERA_FLASH_PWM_CTRL)
-  if (true == i_data) {
-    ledcWrite(FLASH_GPIO_NUM, FLASH_ON_STATUS);
-  } else if (false == i_data) {
-    ledcWrite(FLASH_GPIO_NUM, FLASH_OFF_STATUS);
-  }
-
-/* Digital control of the FLASH */
-#elif (true == CAMERA_FLASH_DIGITAL_CTRL)
-  if (true == i_data) {
-    digitalWrite(FLASH_GPIO_NUM, HIGH);
-  } else if (false == i_data) {
-    digitalWrite(FLASH_GPIO_NUM, LOW);
-  }
-#endif
-
-/* rgbLedWrite control of the FLASH */
-#if (true == CAMERA_FLASH_NEOPIXEL)
-  if (true == i_data) {
-    rgbLedWrite(FLASH_NEOPIXEL_LED_PIN, RGB_BRIGHTNESS, RGB_BRIGHTNESS, RGB_BRIGHTNESS);
-  } else if (false == i_data) {
-    rgbLedWrite(FLASH_NEOPIXEL_LED_PIN, 0, 0, 0);
-  }
-#endif
-#endif
-}
-
-/**
-   @brief Function get flash status
+   @brief Limit the saved frame size to the maximum of the detected sensor, for example after a camera module change.
+          A frame size below the smallest offered one (saved by an older version) becomes the smallest offered one
    @param none
-   @return bool - true = on, false = off
+   @return none
 */
-bool Camera::GetFlashStatus() {
-#if (true == ENABLE_CAMERA_FLASH)
-#if (true == CAMERA_FLASH_PWM_CTRL)
-  if (ledcRead(FLASH_GPIO_NUM) == FLASH_OFF_STATUS) {
-    return false;
-  } else if (ledcRead(FLASH_GPIO_NUM) == FLASH_ON_STATUS) {
-    return true;
+void Camera::CheckFrameSizeLimit() {
+  if (CheckFrameSizeSupported(FrameSize)) {
+    return;
   }
 
-#elif (true == CAMERA_FLASH_DIGITAL_CTRL)
-  if (digitalRead(FLASH_GPIO_NUM) == LOW) {
-    return false;
-  } else if (digitalRead(FLASH_GPIO_NUM) == HIGH) {
-    return true;
+  /* too small: use the smallest offered frame size, otherwise the largest supported one */
+  uint8_t best = CAMERA_MIN_FRAMESIZE_INDEX;
+  if (FrameSize >= CAMERA_MIN_FRAMESIZE_INDEX) {
+    for (uint8_t i = CAMERA_MIN_FRAMESIZE_INDEX; i < FrameSizeTableCount; i++) {
+      if (CheckFrameSizeSupported(i) && (FrameSizeTable[i] > FrameSizeTable[best])) {
+        best = i;
+      }
+    }
   }
-#endif
-#endif
-  return false;
+
+  log->AddEvent(LogLevel_Warning, "Frame size " + String(FrameSize) + " is not supported by " + CameraName + ". New frame size: " + String(best));
+  FrameSize = best;
+  TFrameSize = FrameSizeTable[best];
+  config->SaveFrameSize(best);
+}
+
+/**
+   @brief Get XCLK for the detected camera sensor. Before the detection the OV2640 value is used
+   @param none
+   @return uint32_t - XCLK [Hz]
+*/
+uint32_t Camera::GetSensorXclk() {
+  switch (CameraType) {
+    case OV3660_PID:
+      return CAMERA_XCLK_OV3660;
+    case OV5640_PID:
+      return CAMERA_XCLK_OV5640;
+    case OV2640_PID:
+    default:
+      return CAMERA_XCLK_OV2640;
+  }
+}
+
+/**
+   @brief Get the name of the detected camera sensor
+   @param none
+   @return String - name, for example OV5640
+*/
+String Camera::GetDetectedSensorName() {
+  return CameraName;
 }
 
 /**
@@ -300,28 +483,56 @@ void Camera::ApplyCameraCfg() {
 
   /* sensor configuration */
   sensor = esp_camera_sensor_get();
-  sensor->set_brightness(sensor, brightness);         // -2 to 2
-  sensor->set_contrast(sensor, contrast);             // -2 to 2
-  sensor->set_saturation(sensor, saturation);         // -2 to 2
-  sensor->set_special_effect(sensor, 0);              // 0 to 6 (0 - No Effect, 1 - Negative, 2 - Grayscale, 3 - Red Tint, 4 - Green Tint, 5 - Blue Tint, 6 - Sepia)
-  sensor->set_whitebal(sensor, awb);                  // automatic white balancing 0 = disable , 1 = enable
-  sensor->set_awb_gain(sensor, awb_gain);             // automatic white balancing gain 0 = disable , 1 = enable
-  sensor->set_wb_mode(sensor, wb_mode);               // white balancing mode 0 to 4 - if awb_gain enabled (0 - Auto, 1 - Sunny, 2 - Cloudy, 3 - Office, 4 - Home)
-  sensor->set_exposure_ctrl(sensor, exposure_ctrl);   // exposition controll 0 = disable , 1 = enable
-  sensor->set_aec2(sensor, aec2);                     // enable exposition controll 0 = disable , 1 = enable
-  sensor->set_ae_level(sensor, ae_level);             // automatic exposition level -2 to 2
-  sensor->set_aec_value(sensor, aec_value);           // expozition time - 0 to 1200
-  sensor->set_gain_ctrl(sensor, gain_ctrl);           // automatic gain controll 0 = disable , 1 = enable
-  sensor->set_agc_gain(sensor, agc_gain);             // automatic gain controll level 0 to 30
-  sensor->set_gainceiling(sensor, (gainceiling_t)0);  // maximum gain 0 to 6
-  sensor->set_bpc(sensor, bpc);                       // bad pixel correction 0 = disable , 1 = enable
-  sensor->set_wpc(sensor, wpc);                       // white pixel correction 0 = disable , 1 = enable
-  sensor->set_raw_gma(sensor, raw_gama);              // raw gama correction 0 = disable , 1 = enable
-  sensor->set_lenc(sensor, lensc);                    // lens correction 0 = disable , 1 = enable
-  sensor->set_hmirror(sensor, hmirror);               // horizontal mirror 0 = disable , 1 = enable
-  sensor->set_vflip(sensor, vflip);                   // vertical flip 0 = disable , 1 = enable
-  sensor->set_dcw(sensor, 1);                         // 0 = disable , 1 = enable
-  sensor->set_colorbar(sensor, 0);                    // external collor lines, 0 = disable , 1 = enable
+  if (sensor == NULL) {
+    log->AddEvent(LogLevel_Error, F("Camera sensor is NULL"));
+    return;
+  }
+
+/* not every sensor driver implements every setting, skip the missing ones */
+#define CAMERA_SENSOR_SET(function, value) \
+  if (sensor->function != NULL) { \
+    sensor->function(sensor, value); \
+  }
+
+  CAMERA_SENSOR_SET(set_brightness, brightness);         // -2 to 2
+  CAMERA_SENSOR_SET(set_contrast, contrast);             // -2 to 2
+  CAMERA_SENSOR_SET(set_saturation, saturation);         // -2 to 2
+  CAMERA_SENSOR_SET(set_special_effect, 0);              // 0 to 6 (0 - No Effect, 1 - Negative, 2 - Grayscale, 3 - Red Tint, 4 - Green Tint, 5 - Blue Tint, 6 - Sepia)
+  CAMERA_SENSOR_SET(set_whitebal, awb);                  // automatic white balancing 0 = disable , 1 = enable
+  CAMERA_SENSOR_SET(set_awb_gain, awb_gain);             // automatic white balancing gain 0 = disable , 1 = enable
+  CAMERA_SENSOR_SET(set_wb_mode, wb_mode);               // white balancing mode 0 to 4 - if awb_gain enabled (0 - Auto, 1 - Sunny, 2 - Cloudy, 3 - Office, 4 - Home)
+  CAMERA_SENSOR_SET(set_exposure_ctrl, exposure_ctrl);   // exposition controll 0 = disable , 1 = enable
+  CAMERA_SENSOR_SET(set_aec2, aec2);                     // enable exposition controll 0 = disable , 1 = enable
+  CAMERA_SENSOR_SET(set_ae_level, ae_level);             // automatic exposition level -2 to 2
+  /* OV3660 and OV5640 (the same driver code): the automatic exposure and gain continue from the manual exposure time and
+     gain registers, a manual value written while the automatic control is on makes the picture dark. The gain ceiling of
+     these drivers is the raw gain limit and not gainceiling_t, 0 = no gain at all, the sensor default is kept. The manual
+     gain is the real gain, 0 = black, the level 0 - 30 is sent as 1x - 31x. The OV2640 uses the same calls as before
+     (OV3660 fix from the fork of dawidkulpa). The automatic gain is limited to OV3660_AGC_GAIN_CEILING, without the limit
+     the picture is very grainy in a dark room */
+  bool ov3660 = (OV3660_PID == sensor->id.PID) || (OV5640_PID == sensor->id.PID);
+  if ((false == ov3660) || (false == exposure_ctrl)) {
+    CAMERA_SENSOR_SET(set_aec_value, aec_value);         // expozition time - 0 to 1200
+  }
+  CAMERA_SENSOR_SET(set_gain_ctrl, gain_ctrl);           // automatic gain controll 0 = disable , 1 = enable
+  if (false == ov3660) {
+    CAMERA_SENSOR_SET(set_agc_gain, agc_gain);           // automatic gain controll level 0 to 30
+    CAMERA_SENSOR_SET(set_gainceiling, (gainceiling_t)0);  // maximum gain 0 to 6
+  } else if (true == gain_ctrl) {
+    CAMERA_SENSOR_SET(set_gainceiling, (gainceiling_t)OV3660_AGC_GAIN_CEILING);  // OV3660, OV5640: maximum automatic gain
+  } else {
+    CAMERA_SENSOR_SET(set_agc_gain, agc_gain + 1);       // OV3660, OV5640: real gain 1x - 31x
+  }
+  CAMERA_SENSOR_SET(set_bpc, bpc);                       // bad pixel correction 0 = disable , 1 = enable
+  CAMERA_SENSOR_SET(set_wpc, wpc);                       // white pixel correction 0 = disable , 1 = enable
+  CAMERA_SENSOR_SET(set_raw_gma, raw_gama);              // raw gama correction 0 = disable , 1 = enable
+  CAMERA_SENSOR_SET(set_lenc, lensc);                    // lens correction 0 = disable , 1 = enable
+  CAMERA_SENSOR_SET(set_hmirror, hmirror);               // horizontal mirror 0 = disable , 1 = enable
+  CAMERA_SENSOR_SET(set_vflip, vflip);                   // vertical flip 0 = disable , 1 = enable
+  CAMERA_SENSOR_SET(set_dcw, 1);                         // 0 = disable , 1 = enable
+  CAMERA_SENSOR_SET(set_colorbar, 0);                    // external collor lines, 0 = disable , 1 = enable
+
+#undef CAMERA_SENSOR_SET
 }
 
 /**
@@ -330,6 +541,15 @@ void Camera::ApplyCameraCfg() {
    @return none
 */
 void Camera::ReinitCameraModule() {
+  /* the web server and the photo task can both reinit the camera, never deinit during a capture */
+  bool locked = xSemaphoreTake(frameBufferSemaphore, pdMS_TO_TICKS(CAMERA_SEMAPHORE_TIMEOUT));
+  if (!locked) {
+    log->AddEvent(LogLevel_Warning, F("Camera reinit without frame buffer semaphore"));
+  }
+
+  /* deinit frees all frame buffers, the held one must not be returned later */
+  FrameBuffer = NULL;
+  CameraCaptureSuccess = false;
   esp_err_t err = esp_camera_deinit();
   if (err != ESP_OK) {
     log->AddEvent(LogLevel_Warning, F("Camera error deinit camera module. Error: "), String(err, HEX));
@@ -337,6 +557,11 @@ void Camera::ReinitCameraModule() {
   delay(100);
   InitCameraModule();
   ApplyCameraCfg();
+  InitAutofocus();
+
+  if (locked) {
+    xSemaphoreGive(frameBufferSemaphore);
+  }
 }
 
 /**
@@ -359,6 +584,8 @@ void Camera::GetCameraModel() {
 
   CameraType = (camera_pid_t) sensor->id.PID;
   CameraName = info->name;
+  SensorMaxFrameSize = info->max_size;
+  update_exif_camera_model(info->name);
   log->AddEvent(LogLevel_Info, F("Camera type: "), String(CameraType));
   log->AddEvent(LogLevel_Info, F("Camera name: "), String(CameraName));
   log->AddEvent(LogLevel_Info, F("Camera model: "), String(info->model));
@@ -373,102 +600,103 @@ void Camera::GetCameraModel() {
    @return none
 */
 void Camera::CapturePhoto() {
-
-  /* Check if photo is already sending */
-  if (true == PhotoSending) {
-    log->AddEvent(LogLevel_Info, F("Sending photo"));
+  if (!xSemaphoreTake(frameBufferSemaphore, pdMS_TO_TICKS(CAMERA_SEMAPHORE_TIMEOUT))) {
+    log->AddEvent(LogLevel_Error, F("Failed to take frame buffer semaphore"));
     return;
   }
 
-  /* Check if stream is on */
-  if (false == StreamOnOff) {
-    if (!xSemaphoreTake(frameBufferSemaphore, portMAX_DELAY)) {
-      log->AddEvent(LogLevel_Error, F("Failed to take frame buffer semaphore"));
-      return;
-    }
+  /* Stream is on: the photo for Prusa Connect is the latest stream frame, the camera is used by the stream capture task */
+  if (true == StreamOnOff) {
+    xSemaphoreGive(frameBufferSemaphore);
 
-    CameraCaptureSuccess = false;
-    /* check flash, and enable FLASH LED */
-    if (true == CameraFlashEnable) {
-      SetFlashStatus(true);
-      delay(CameraFlashTime);
+    /* wait for the first frame after the stream start */
+    uint32_t start = millis();
+    while ((StreamLatest < 0) && ((millis() - start) < CAMERA_STREAM_FRAME_TIMEOUT)) {
+      delay(10);
     }
+    CameraCaptureSuccess = (StreamLatest >= 0);
+    return;
+  }
+
+  {
+    CameraCaptureSuccess = false;
 
     if (FrameBuffer) {
       esp_camera_fb_return(FrameBuffer);
+      FrameBuffer = NULL;
     }
 
     /* Capturing a training photo. Without this sequence, the camera will not obtain the current photo but photo from the previous cycle. */
-    FrameBuffer = esp_camera_fb_get();
-    if (FrameBuffer) {
-      esp_camera_fb_return(FrameBuffer);
+    camera_fb_t* TrainingFrame = esp_camera_fb_get();
+    if (TrainingFrame) {
+      esp_camera_fb_return(TrainingFrame);
       log->AddEvent(LogLevel_Verbose, F("Camera capture training photo"));
     } else {
-      esp_camera_fb_return(FrameBuffer);
       log->AddEvent(LogLevel_Error, F("Camera capture failed training photo"));
-      //ReinitCameraModule();
     }
 
-    int attempts = 0;
     const int maxAttempts = 5;
     PhotoExifData.header = NULL;
-    do {
-      log->AddEvent(LogLevel_Info, F("Taking photo..."));
+    for (int attempts = 0; attempts < maxAttempts; attempts++) {
+      log->AddEvent(LogLevel_Verbose, F("Taking photo..."));
 
       FrameBuffer = esp_camera_fb_get();
       if (!FrameBuffer) {
         CameraCaptureFailedCounter++;
         log->AddEvent(LogLevel_Error, F("Camera capture failed! photo. Attempt: "), String(CameraCaptureFailedCounter));
-        xSemaphoreGive(frameBufferSemaphore);  // Release semaphore before returning
-        return;
+        break;
       }
 
       char buf[150] = { '\0' };
-      uint8_t ControlFlag = (uint8_t)FrameBuffer->buf[15];
+      uint8_t ControlFlag = (FrameBuffer->len > 15) ? (uint8_t)FrameBuffer->buf[15] : 0xFF;
       sprintf(buf, "The picture has been saved. Size: %d bytes, Photo resolution: %zu x %zu", FrameBuffer->len, FrameBuffer->width, FrameBuffer->height);
-      log->AddEvent(LogLevel_Info, buf);
+      log->AddEvent(LogLevel_Verbose, buf);
 
-      if (ControlFlag != 0x00) {
+      /* esp_camera_fb_get() returns only JPEG frames with the start and end markers, the start is checked again here.
+         The check of byte 15 (0 in the JFIF header) comes from the original firmware for the OV2640, other sensors
+         write other values there, so it is used only for the OV2640 */
+      bool BadFrame = (FrameBuffer->len <= 100) || (FrameBuffer->buf[0] != 0xFF) || (FrameBuffer->buf[1] != 0xD8);
+      if ((OV2640_PID == CameraType) && (ControlFlag != 0x00)) {
+        BadFrame = true;
+      }
+
+      if (true == BadFrame) {
         log->AddEvent(LogLevel_Error, "Camera capture failed! flag: " + String(ControlFlag, HEX));
-        FrameBuffer->len = 0;
+        /* return the bad frame, otherwise the next esp_camera_fb_get() waits for a free buffer and times out */
+        esp_camera_fb_return(FrameBuffer);
+        FrameBuffer = NULL;
+        continue;
+      }
 
+      log->AddEvent(LogLevel_Verbose, F("Photo OK! "), String(ControlFlag, HEX));
+      CameraCaptureFailedCounter = 0;
+
+      /* generate exif header */
+      update_exif_from_cfg(imageExifRotation);
+      get_exif_header(FrameBuffer, &PhotoExifData.header, &PhotoExifData.len);
+      PhotoExifData.offset = get_jpeg_data_offset(FrameBuffer);
+      CameraCaptureSuccess = true;
+
+      /* keep a copy of the photo, the stream returns the frame buffer to the driver */
+      if ((PhotoExifData.header != NULL) && (PhotoExifData.offset < FrameBuffer->len)) {
+        SaveLastPhoto(PhotoExifData.header, PhotoExifData.len, FrameBuffer->buf + PhotoExifData.offset, FrameBuffer->len - PhotoExifData.offset);
       } else {
-        log->AddEvent(LogLevel_Info, F("Photo OK! "), String(ControlFlag, HEX));
-        CameraCaptureFailedCounter = 0;
-
-        /* generate exif header */
-        update_exif_from_cfg(imageExifRotation);
-        get_exif_header(FrameBuffer, &PhotoExifData.header, &PhotoExifData.len);
-        PhotoExifData.offset = get_jpeg_data_offset(FrameBuffer);
-        CameraCaptureSuccess = true;
-        
-        if (PhotoExifData.header != NULL) {
-          log->AddEvent(LogLevel_Info, F("Exif header OK! Len: "), String(PhotoExifData.len));
-        } else {
-          log->AddEvent(LogLevel_Error, F("Exif header failed! "), String(PhotoExifData.len));
-        }
+        SaveLastPhoto(NULL, 0, FrameBuffer->buf, FrameBuffer->len);
       }
 
-      attempts++;
-      if (attempts >= maxAttempts) {
-        log->AddEvent(LogLevel_Error, F("Failed to capture a valid photo after max attempts"));
-        break;
+      if (PhotoExifData.header != NULL) {
+        log->AddEvent(LogLevel_Verbose, F("Exif header OK! Len: "), String(PhotoExifData.len));
+      } else {
+        log->AddEvent(LogLevel_Error, F("Exif header failed! "), String(PhotoExifData.len));
       }
-    } while (!(FrameBuffer->len > 100));
-
-    /* Disable flash */
-    if (true == CameraFlashEnable) {
-      SetFlashStatus(false);
+      break;
     }
-    xSemaphoreGive(frameBufferSemaphore);
 
-  } else {
-    /* Stream is on, set flag for sending photo */
-    if (xSemaphoreTake(frameBufferSemaphore, portMAX_DELAY)) {
-      StreamSendingPhoto = true;
-      xSemaphoreGive(frameBufferSemaphore);
+    if (false == CameraCaptureSuccess) {
+      log->AddEvent(LogLevel_Error, F("Failed to capture a valid photo"));
     }
   }
+  xSemaphoreGive(frameBufferSemaphore);
 
   /* Reinit camera module if photo capture failed */
   if (CameraCaptureFailedCounter > CAMERA_MAX_FAIL_CAPTURE) { 
@@ -479,131 +707,226 @@ void Camera::CapturePhoto() {
 }
 
 /**
-   @brief Capture Stream
-   @param camera_fb_t * - pointer to camera_fb_t
+   @brief Start the stream capture task. Call it once, after the camera init
+   @param none
    @return none
 */
-void Camera::CaptureStream(camera_fb_t* i_buf) {
-  if (xSemaphoreTake(frameBufferSemaphore, portMAX_DELAY)) {
-    do {
-      /* capture final photo */
-      FrameBuffer = esp_camera_fb_get();
-      if (!FrameBuffer) {
-        log->AddEvent(LogLevel_Error, F("Camera capture failed! stream"));
-        i_buf = NULL;
-        return;
-      }
+void Camera::StartStreamTask() {
+  if (NULL == StreamTask) {
+    /* core 1: the WiFi stack runs on core 0 */
+    xTaskCreatePinnedToCore(Camera::StreamTaskEntry, "StreamCapture", CAMERA_STREAM_TASK_STACK, this, 2, &StreamTask, 1);
+  }
+}
 
-      /* check if photo is correctly saved */
-    } while (!(FrameBuffer->len > 100));
+/**
+   @brief Stream capture task entry point
+   @param void * - pointer to the Camera object
+   @return none
+*/
+void Camera::StreamTaskEntry(void *i_param) {
+  static_cast<Camera *>(i_param)->StreamTaskLoop();
+}
 
-    /* check if the photo is rotated */
-    bool ExifStatus = false;
+/**
+   @brief Stream capture task. Captures frames only while a stream client is connected
+   @param none
+   @return none
+*/
+void Camera::StreamTaskLoop() {
+  log->AddEvent(LogLevel_Info, F("Stream capture task. core: "), String(xPortGetCoreID()));
+  esp_task_wdt_add(NULL);
 
-#if (true == CAMERA_EXIF_ROTATION_STREAM)
-    if (1 != imageExifRotation) { /* 1 = image rotation 0 degree */
-      /* generate exif header */
-      update_exif_from_cfg(imageExifRotation);
-      get_exif_header(FrameBuffer, &PhotoExifData.header, &PhotoExifData.len);
-      PhotoExifData.offset = get_jpeg_data_offset(FrameBuffer);
-      if (PhotoExifData.header != NULL) {
-        /* memory allocation release */
-        if (FrameBufferExif != NULL) {
-          if (FrameBufferExif->buf != NULL) {
-            free(FrameBufferExif->buf);
-            FrameBufferExif->buf = NULL; /* Set to NULL after freeing */
-          }
+  while (true) {
+    esp_task_wdt_reset();
 
-          free(FrameBufferExif);
-          FrameBufferExif = NULL; /* Set to NULL after freeing */
+    if (0 == StreamClients) {
+      /* no client: release the PSRAM of the stream buffers that nobody reads */
+      xSemaphoreTake(streamMutex, portMAX_DELAY);
+      for (uint8_t i = 0; i < CAMERA_STREAM_BUFFERS; i++) {
+        if ((NULL != StreamBuf[i]) && (0 == StreamBufReaders[i])) {
+          free(StreamBuf[i]);
+          StreamBuf[i] = NULL;
+          StreamBufCapacity[i] = 0;
+          StreamBufLen[i] = 0;
         }
-
-        /* Allocate memory for the duplicate frame structure */
-        FrameBufferExif = (camera_fb_t*)heap_caps_malloc(sizeof(camera_fb_t), MALLOC_CAP_SPIRAM);
-
-        /* Calculate the total size of the buffer */
-        size_t totalSize = PhotoExifData.len + FrameBuffer->len - PhotoExifData.offset;
-
-        /* Allocate memory for the image data */
-        FrameBufferExif->buf = (uint8_t*)heap_caps_malloc(totalSize, MALLOC_CAP_SPIRAM);
-        if (FrameBufferExif->buf == NULL) {
-          log->AddEvent(LogLevel_Error, F("Failed to allocate memory for EXIF buffer"));
-          return;
-        }
-
-        /* copy the EXIF data to the buffer */
-        memcpy(FrameBufferExif->buf, PhotoExifData.header, PhotoExifData.len);
-
-        /* copy the image data to the buffer */
-        memcpy(FrameBufferExif->buf + PhotoExifData.len, FrameBuffer->buf + PhotoExifData.offset, FrameBuffer->len - PhotoExifData.offset);
-
-        /* Set the length of the buffer */
-        FrameBufferExif->len = totalSize;
-
-        *i_buf = *FrameBufferExif;
-        ExifStatus = true;
-        
-      } else {
-        /* copy the frame buffer to the buffer */
-        *i_buf = *FrameBuffer;
       }
+      StreamLatest = -1;
+      xSemaphoreGive(streamMutex);
 
-    } else {
-      /* copy the frame buffer to the buffer */
-      *i_buf = *FrameBuffer;
+      /* woken up by SetStreamStatus when a client connects */
+      ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
+      continue;
     }
-#else
-    *i_buf = *FrameBuffer;
+
+    if (false == StreamCaptureFrame()) {
+      vTaskDelay(pdMS_TO_TICKS(100));
+    }
+  }
+}
+
+/**
+   @brief Capture one stream frame into a free stream buffer.
+          A new frame is captured when the latest frame was taken by a client, or when it is older than
+          CAMERA_STREAM_MAX_FRAME_AGE, so the camera does not work faster than the clients receive the frames
+   @param none
+   @return bool - false when the capture failed
+*/
+bool Camera::StreamCaptureFrame() {
+  /* find a free buffer: not the latest frame and not being sent */
+  int8_t w = -1;
+  xSemaphoreTake(streamMutex, portMAX_DELAY);
+  /* at most CAMERA_STREAM_FRAME_INTERVAL between the frames, slower when the MCU is hot */
+  uint32_t age = millis() - StreamLatestTime;
+  uint32_t interval = (true == McuTemperature.StreamSlow) ? CAMERA_STREAM_HOT_FRAME_INTERVAL : CAMERA_STREAM_FRAME_INTERVAL;
+  bool wait = (StreamLatest >= 0) && ((age < interval) || ((false == StreamLatestConsumed) && (age < CAMERA_STREAM_MAX_FRAME_AGE)));
+  if (false == wait) {
+    for (uint8_t i = 0; i < CAMERA_STREAM_BUFFERS; i++) {
+      if ((i != StreamLatest) && (0 == StreamBufReaders[i])) {
+        w = i;
+        break;
+      }
+    }
+  }
+  xSemaphoreGive(streamMutex);
+
+  if (w < 0) {
+    vTaskDelay(pdMS_TO_TICKS(10));
+    return true;
+  }
+
+  if (!xSemaphoreTake(frameBufferSemaphore, pdMS_TO_TICKS(CAMERA_SEMAPHORE_TIMEOUT))) {
+    log->AddEvent(LogLevel_Error, F("Stream: failed to take frame buffer semaphore"));
+    return false;
+  }
+
+  /* the stream may have ended while waiting for the semaphore */
+  if (false == StreamOnOff) {
+    xSemaphoreGive(frameBufferSemaphore);
+    return true;
+  }
+
+  camera_fb_t* fb = esp_camera_fb_get();
+  if ((NULL == fb) || (fb->len <= 100)) {
+    if (NULL != fb) {
+      esp_camera_fb_return(fb);
+    }
+    xSemaphoreGive(frameBufferSemaphore);
+    log->AddEvent(LogLevel_Error, F("Camera capture failed! stream"));
+    return false;
+  }
+
+  /* optional EXIF header with the image rotation */
+  const uint8_t* Header = NULL;
+  size_t HeaderLen = 0;
+  size_t Offset = 0;
+#if (true == CAMERA_EXIF_ROTATION_STREAM)
+  if (1 != imageExifRotation) { /* 1 = image rotation 0 degree */
+    update_exif_from_cfg(imageExifRotation);
+    get_exif_header(fb, &Header, &HeaderLen);
+    Offset = get_jpeg_data_offset(fb);
+    if ((NULL == Header) || (Offset >= fb->len)) {
+      Header = NULL;
+      HeaderLen = 0;
+      Offset = 0;
+    }
+  }
 #endif
 
-    /* copy the frame buffer to the duplicate frame buffer. For sending photo to Prusa Connect */
-    if (false == StreamSendingPhoto) {
-      /* memory allocation release */
-      if (FrameBufferDuplicate != NULL) {
-        if (FrameBufferDuplicate->buf != NULL) {
-          free(FrameBufferDuplicate->buf);
-          FrameBufferDuplicate->buf = NULL; /* Set to NULL after freeing */
-        }
-
-        free(FrameBufferDuplicate);
-        FrameBufferDuplicate = NULL; /* Set to NULL after freeing */
-      }
-      
-      /* Allocate memory for the duplicate frame structure */
-      FrameBufferDuplicate = (camera_fb_t*)heap_caps_malloc(sizeof(camera_fb_t), MALLOC_CAP_SPIRAM);
-
-      /* Copy the metadata */
-      if (true == ExifStatus) {
-        memcpy(FrameBufferDuplicate, FrameBufferExif, sizeof(camera_fb_t));
-      } else {
-        memcpy(FrameBufferDuplicate, FrameBuffer, sizeof(camera_fb_t));
-      }
-
-      /* Allocate memory for the image data */
-      if (true == ExifStatus) {
-        FrameBufferDuplicate->buf = (uint8_t*)heap_caps_malloc(FrameBufferExif->len, MALLOC_CAP_SPIRAM);
-      } else {
-        FrameBufferDuplicate->buf = (uint8_t*)heap_caps_malloc(FrameBuffer->len, MALLOC_CAP_SPIRAM);
-      }
-
-      /* Check if memory allocation was successful */
-      if (!FrameBufferDuplicate->buf) {
-        /* Handle error */
-        free(FrameBufferDuplicate);
-        Serial.println("Failed to allocate memory for the duplicate frame buffer");
-      } else {
-        /* Copy the image data */
-        if (true == ExifStatus) {
-          memcpy(FrameBufferDuplicate->buf, FrameBufferExif->buf, FrameBufferExif->len);
-          
-        } else {
-          memcpy(FrameBufferDuplicate->buf, FrameBuffer->buf, FrameBuffer->len);
-        }
-      }
-    }
-
-    xSemaphoreGive(frameBufferSemaphore);
+  /* the buffer grows when a frame is larger, it is not allocated for every frame */
+  size_t Total = HeaderLen + fb->len - Offset;
+  if (StreamBufCapacity[w] < Total) {
+    free(StreamBuf[w]);
+    size_t Capacity = Total + (Total / 4);
+    StreamBuf[w] = (uint8_t*)heap_caps_malloc(Capacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    StreamBufCapacity[w] = (NULL != StreamBuf[w]) ? Capacity : 0;
   }
+
+  bool ret = false;
+  if (NULL != StreamBuf[w]) {
+    if (HeaderLen > 0) {
+      memcpy(StreamBuf[w], Header, HeaderLen);
+    }
+    memcpy(StreamBuf[w] + HeaderLen, fb->buf + Offset, fb->len - Offset);
+    ret = true;
+  } else {
+    log->AddEvent(LogLevel_Error, F("Stream: failed to allocate frame buffer"));
+  }
+
+  /* return the frame to the driver now, the next frame is captured while this one is being sent */
+  esp_camera_fb_return(fb);
+  xSemaphoreGive(frameBufferSemaphore);
+
+  if (true == ret) {
+    xSemaphoreTake(streamMutex, portMAX_DELAY);
+    StreamBufLen[w] = Total;
+    StreamLatest = w;
+    StreamLatestConsumed = false;
+    StreamLatestTime = millis();
+    StreamFrameSeq = StreamFrameSeq + 1; /* volatile: no ++ in C++20 */
+    xSemaphoreGive(streamMutex);
+  }
+
+  return ret;
+}
+
+/**
+   @brief Take the latest stream frame. The frame is not overwritten until StreamReleaseFrame is called
+   @param uint32_t - sequence number of the last frame the caller has, it waits for a newer frame
+   @param uint8_t ** - output, frame data
+   @param size_t * - output, frame length
+   @param uint8_t * - output, buffer index for StreamReleaseFrame
+   @param uint32_t * - output, frame sequence number
+   @param uint32_t - maximum waiting time [ms]
+   @return bool - true when a frame was taken
+*/
+bool Camera::StreamAcquireFrame(uint32_t i_lastSeq, uint8_t **o_buf, size_t *o_len, uint8_t *o_idx, uint32_t *o_seq, uint32_t i_timeout) {
+  uint32_t start = millis();
+
+  while (true) {
+    xSemaphoreTake(streamMutex, portMAX_DELAY);
+    if ((StreamLatest >= 0) && (StreamFrameSeq != i_lastSeq)) {
+      *o_idx = StreamLatest;
+      *o_buf = StreamBuf[StreamLatest];
+      *o_len = StreamBufLen[StreamLatest];
+      *o_seq = StreamFrameSeq;
+      StreamBufReaders[StreamLatest]++;
+      StreamLatestConsumed = true;
+      xSemaphoreGive(streamMutex);
+      return true;
+    }
+    xSemaphoreGive(streamMutex);
+
+    if (((millis() - start) >= i_timeout) || (0 == StreamClients)) {
+      return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(2));
+  }
+}
+
+/**
+   @brief Release a stream frame taken by StreamAcquireFrame
+   @param uint8_t - buffer index
+   @return none
+*/
+void Camera::StreamReleaseFrame(uint8_t i_idx) {
+  if (i_idx >= CAMERA_STREAM_BUFFERS) {
+    return;
+  }
+
+  xSemaphoreTake(streamMutex, portMAX_DELAY);
+  if (StreamBufReaders[i_idx] > 0) {
+    StreamBufReaders[i_idx]--;
+  }
+  xSemaphoreGive(streamMutex);
+}
+
+/**
+   @brief Get count of connected stream clients
+   @param none
+   @return uint8_t - count
+*/
+uint8_t Camera::GetStreamClients() {
+  return StreamClients;
 }
 
 /**
@@ -612,7 +935,16 @@ void Camera::CaptureStream(camera_fb_t* i_buf) {
    @return none
 */
 void Camera::CaptureReturnFrameBuffer() {
-  esp_camera_fb_return(FrameBuffer);
+  if (!xSemaphoreTake(frameBufferSemaphore, pdMS_TO_TICKS(CAMERA_SEMAPHORE_TIMEOUT))) {
+    log->AddEvent(LogLevel_Error, F("Return frame buffer: failed to take semaphore"));
+    return;
+  }
+
+  if (FrameBuffer) {
+    esp_camera_fb_return(FrameBuffer);
+    FrameBuffer = NULL;
+  }
+  xSemaphoreGive(frameBufferSemaphore);
 }
 
 /**
@@ -621,11 +953,203 @@ void Camera::CaptureReturnFrameBuffer() {
    @return none
 */
 void Camera::SetStreamStatus(bool i_status) {
-  StreamOnOff = i_status;
-  if (FrameBuffer) {
-    esp_camera_fb_return(FrameBuffer);
+  /* the client count must always be updated, also when the camera is busy */
+  bool locked = xSemaphoreTake(frameBufferSemaphore, pdMS_TO_TICKS(CAMERA_SEMAPHORE_TIMEOUT));
+  if (!locked) {
+    log->AddEvent(LogLevel_Error, F("Set stream status: failed to take semaphore"));
   }
-  log->AddEvent(LogLevel_Info, F("Camera video stream: "), String(StreamOnOff));
+
+  xSemaphoreTake(streamMutex, portMAX_DELAY);
+  if (true == i_status) {
+    if (0 == StreamClients) {
+      /* new stream session: never send a frame from the previous session */
+      StreamLatest = -1;
+      StreamLatestConsumed = false;
+    }
+    StreamClients = StreamClients + 1;
+  } else if (StreamClients > 0) {
+    StreamClients = StreamClients - 1;
+  }
+  StreamOnOff = (StreamClients > 0);
+  xSemaphoreGive(streamMutex);
+
+  if (locked) {
+    /* the held photo blocks the single camera frame buffer, return it to the driver for the stream */
+    if (FrameBuffer) {
+      esp_camera_fb_return(FrameBuffer);
+      FrameBuffer = NULL;
+    }
+
+    /* a new photo is captured in the next cycle */
+    CameraCaptureSuccess = false;
+    xSemaphoreGive(frameBufferSemaphore);
+  }
+
+  if (NULL != StreamTask) {
+    xTaskNotifyGive(StreamTask);
+  }
+  log->AddEvent(LogLevel_Info, F("Camera video stream clients: "), String(StreamClients));
+}
+
+/**
+   @brief Copy the last photo to a new buffer. Prusa Connect upload, SD card and WEB server work with this copy,
+          so the camera can capture a new photo while the copy is still being sent.
+          Without stream: EXIF header + JPEG data of the last photo. With stream: the last stream frame.
+   @param uint8_t ** - output, allocated buffer. The caller must release it with free()
+   @param size_t * - output, buffer length
+   @return bool - true when a photo is available
+*/
+bool Camera::GetPhotoCopy(uint8_t** o_buf, size_t* o_len) {
+  *o_buf = NULL;
+  *o_len = 0;
+
+  /* stream is on: copy the latest stream frame, the camera is used by the stream capture task */
+  if (true == StreamOnOff) {
+    uint8_t* Frame = NULL;
+    size_t FrameLen = 0;
+    uint8_t Idx = 0;
+    uint32_t Seq = 0;
+    if (false == StreamAcquireFrame(UINT32_MAX, &Frame, &FrameLen, &Idx, &Seq, CAMERA_STREAM_FRAME_TIMEOUT)) {
+      log->AddEvent(LogLevel_Error, F("Photo copy: no stream frame"));
+      return false;
+    }
+
+    uint8_t* Buf = (uint8_t*)heap_caps_malloc(FrameLen, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (Buf == NULL) {
+      Buf = (uint8_t*)malloc(FrameLen);
+    }
+    if (Buf != NULL) {
+      memcpy(Buf, Frame, FrameLen);
+      SaveLastPhoto(NULL, 0, Frame, FrameLen);
+      *o_buf = Buf;
+      *o_len = FrameLen;
+      /* real size of a photo with these settings, for the photo size estimate on the WEB page */
+      LastPhotoSize = FrameLen;
+      LastPhotoFrameSize = FrameSize;
+      LastPhotoQuality = PhotoQuality;
+    } else {
+      log->AddEvent(LogLevel_Error, F("Photo copy: failed to allocate memory: "), String(FrameLen));
+    }
+    StreamReleaseFrame(Idx);
+    return (Buf != NULL);
+  }
+
+  if (!xSemaphoreTake(frameBufferSemaphore, pdMS_TO_TICKS(CAMERA_SEMAPHORE_TIMEOUT))) {
+    log->AddEvent(LogLevel_Error, F("Photo copy: failed to take frame buffer semaphore"));
+    return false;
+  }
+
+  const uint8_t* Header = NULL;
+  size_t HeaderLen = 0;
+  const uint8_t* Data = NULL;
+  size_t DataLen = 0;
+
+  if ((false == StreamOnOff) && (true == CameraCaptureSuccess) && (FrameBuffer != NULL)) {
+    if ((PhotoExifData.header != NULL) && (PhotoExifData.offset < FrameBuffer->len)) {
+      Header = PhotoExifData.header;
+      HeaderLen = PhotoExifData.len;
+      Data = FrameBuffer->buf + PhotoExifData.offset;
+      DataLen = FrameBuffer->len - PhotoExifData.offset;
+    } else {
+      Data = FrameBuffer->buf;
+      DataLen = FrameBuffer->len;
+    }
+  }
+
+  bool ret = false;
+  if ((Data != NULL) && (DataLen > 0)) {
+    size_t TotalLen = HeaderLen + DataLen;
+    uint8_t* Buf = (uint8_t*)heap_caps_malloc(TotalLen, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (Buf == NULL) {
+      Buf = (uint8_t*)malloc(TotalLen);
+    }
+
+    if (Buf != NULL) {
+      if (HeaderLen > 0) {
+        memcpy(Buf, Header, HeaderLen);
+      }
+      memcpy(Buf + HeaderLen, Data, DataLen);
+      *o_buf = Buf;
+      *o_len = TotalLen;
+      ret = true;
+      LastPhotoSize = TotalLen;
+      LastPhotoFrameSize = FrameSize;
+      LastPhotoQuality = PhotoQuality;
+    } else {
+      log->AddEvent(LogLevel_Error, F("Photo copy: failed to allocate memory: "), String(TotalLen));
+    }
+  }
+
+  xSemaphoreGive(frameBufferSemaphore);
+  return ret;
+}
+
+/**
+   @brief Save a copy of the last good photo (EXIF header + JPEG data). /saved-photo.jpg sends it when the camera
+          has no photo, for example after a stream, until the next photo is captured
+   @param const uint8_t* - EXIF header, NULL = none
+   @param size_t - EXIF header length
+   @param const uint8_t* - JPEG data
+   @param size_t - JPEG data length
+   @return none
+*/
+void Camera::SaveLastPhoto(const uint8_t* i_header, size_t i_header_len, const uint8_t* i_data, size_t i_data_len) {
+  if ((i_data == NULL) || (i_data_len == 0)) {
+    return;
+  }
+  if (i_header == NULL) {
+    i_header_len = 0;
+  }
+
+  size_t TotalLen = i_header_len + i_data_len;
+  xSemaphoreTake(savedPhotoMutex, portMAX_DELAY);
+  if (TotalLen > SavedPhotoCapacity) {
+    /* the buffer only grows, a photo with a smaller resolution fits in it */
+    if (SavedPhotoBuf != NULL) {
+      heap_caps_free(SavedPhotoBuf);
+    }
+    SavedPhotoBuf = (uint8_t*)heap_caps_malloc(TotalLen, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    SavedPhotoCapacity = (SavedPhotoBuf != NULL) ? TotalLen : 0;
+    SavedPhotoLen = 0;
+  }
+
+  if (SavedPhotoBuf != NULL) {
+    if (i_header_len > 0) {
+      memcpy(SavedPhotoBuf, i_header, i_header_len);
+    }
+    memcpy(SavedPhotoBuf + i_header_len, i_data, i_data_len);
+    SavedPhotoLen = TotalLen;
+  } else {
+    log->AddEvent(LogLevel_Warning, F("Saved photo: failed to allocate memory: "), String(TotalLen));
+  }
+  xSemaphoreGive(savedPhotoMutex);
+}
+
+/**
+   @brief Copy of the photo for the WEB page and other clients (/saved-photo.jpg): the current photo, or the last
+          saved photo when the camera has none. Not for the upload to Prusa Connect, it must never send an old photo
+   @param uint8_t** - copy of the photo, the caller frees it with free()
+   @param size_t* - length of the copy
+   @return bool - true = OK
+*/
+bool Camera::GetSavedPhotoCopy(uint8_t** o_buf, size_t* o_len) {
+  if (true == GetPhotoCopy(o_buf, o_len)) {
+    return true;
+  }
+
+  bool ret = false;
+  xSemaphoreTake(savedPhotoMutex, portMAX_DELAY);
+  if ((SavedPhotoBuf != NULL) && (SavedPhotoLen > 0)) {
+    uint8_t* Buf = (uint8_t*)heap_caps_malloc(SavedPhotoLen, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (Buf != NULL) {
+      memcpy(Buf, SavedPhotoBuf, SavedPhotoLen);
+      *o_buf = Buf;
+      *o_len = SavedPhotoLen;
+      ret = true;
+    }
+  }
+  xSemaphoreGive(savedPhotoMutex);
+  return ret;
 }
 
 /**
@@ -688,123 +1212,20 @@ void Camera::StreamClearFrameData() {
 }
 
 /**
-   @brief Set Sending Photo for Stream
-   @param bool - sending photo
-   @return none
-*/
-void Camera::StreamSetSendingPhoto(bool i_data) {
-  StreamSendingPhoto = i_data;
-}
-
-/**
-   @brief Get Photo
-   @param none
-   @return String - photo
-*/
-String Camera::GetPhoto() {
-  Photo = "";
-  for (size_t i = 0; i < FrameBuffer->len; i++) {
-    Photo += (char)FrameBuffer->buf[i];
-  }
-  return Photo;
-}
-
-/**
-   @brief Get Photo Frame Buffer
-   @param none
-   @return camera_fb_t* - photo frame buffer
-*/
-camera_fb_t* Camera::GetPhotoFb() {
-  return FrameBuffer;
-}
-
-/**
-   @brief Get Photo Frame Buffer Duplicate
-   @param none
-   @return camera_fb_t* - photo frame buffer duplicate
-*/
-camera_fb_t* Camera::GetPhotoFbDuplicate() {
-  return FrameBufferDuplicate;
-}
-
-/**
-   @brief Get Photo Exif Data
-   @param none
-   @return PhotoExifData_t* - photo exif data
-*/
-PhotoExifData_t* Camera::GetPhotoExifData() {
-  return &PhotoExifData;
-}
-
-/**
-   @brief Copy Photo
-   @param camera_fb_t* - pointer to camera_fb_t
-   @return none
-*/
-void Camera::CopyPhoto(camera_fb_t* i_data) {
-  *i_data = *FrameBuffer;
-}
-
-/**
-   @brief Copy Photo
-   @param String* - pointer to string
-   @return none
-*/
-void Camera::CopyPhoto(String* i_data) {
-  Photo = "";
-  for (size_t i = 0; i < FrameBuffer->len; i++) {
-    Photo += (char)FrameBuffer->buf[i];
-  }
-  *i_data = Photo;
-}
-
-/**
- * @brief Copy photo from frame buffer to string array with range
- * 
- * @param i_data - pointer to string 
- * @param i_from - start index
- * @param i_to - end index
- */
-void Camera::CopyPhoto(String* i_data, int i_from, int i_to) {
-  *i_data = "";
-
-  for (int i = i_from; i < i_to; i++) {
-    *i_data += (char)FrameBuffer->buf[i];
-  }
-}
-
-/**
- * @brief Copy photo from frame buffer to char array with range
- * 
- * @param i_data - pointer to char array
- * @param i_from - start index
- * @param i_to - end index
- */
-void Camera::CopyPhoto(char* i_data, int i_from, int i_to) {
-  int length = i_to - i_from;
-  memcpy(i_data, FrameBuffer->buf + i_from, length);
-  i_data[length + 1] = '\0';
-}
-
-/**
- * @brief Get Photo Size
- * 
- * @return int - photo size
- */
-int Camera::GetPhotoSize() {
-  log->AddEvent(LogLevel_Verbose, F("Photo size: "), String(FrameBuffer->len));
-  return (int)FrameBuffer->len;
-}
-
-/**
    @brief Set Photo Quality
-   @param uint8_t - photo quality
-   @return none
+   @param uint8_t - photo quality, CAMERA_JPEG_QUALITY_MIN - CAMERA_JPEG_QUALITY_MAX, lower is better
+   @return bool - false when the value is out of range, nothing is changed then
 */
-void Camera::SetPhotoQuality(uint8_t i_data) {
+bool Camera::SetPhotoQuality(uint8_t i_data) {
+  if ((i_data < CAMERA_JPEG_QUALITY_MIN) || (i_data > CAMERA_JPEG_QUALITY_MAX)) {
+    log->AddEvent(LogLevel_Warning, F("Photo quality out of range: "), String(i_data));
+    return false;
+  }
+
   config->SavePhotoQuality(i_data);
   PhotoQuality = i_data;
   ReinitCameraModule();
+  return true;
 }
 
 /**
@@ -812,11 +1233,17 @@ void Camera::SetPhotoQuality(uint8_t i_data) {
    @param uint8_t - frame size
    @return none
 */
-void Camera::SetFrameSize(uint8_t i_data) {
+bool Camera::SetFrameSize(uint8_t i_data) {
+  if (false == CheckFrameSizeSupported(i_data)) {
+    log->AddEvent(LogLevel_Warning, F("Frame size is not supported by the camera sensor: "), String(i_data));
+    return false;
+  }
+
   config->SaveFrameSize(i_data);
   FrameSize = i_data;
   TFrameSize = TransformFrameSizeDataType(i_data);
   ReinitCameraModule();
+  return true;
 }
 
 /**
@@ -1017,26 +1444,6 @@ void Camera::SetExposureCtrl(bool i_data) {
   ApplyCameraCfg();
 }
 
-/**
-   @brief Set Camera Flash Enable
-   @param bool - flash enable/disable
-   @return none
-*/
-void Camera::SetCameraFlashEnable(bool i_data) {
-  config->SaveCameraFlashEnable(i_data);
-  CameraFlashEnable = i_data;
-}
-
-/**
-   @brief Set Camera Flash Time
-   @param uint16_t - flash time
-   @return none
-*/
-void Camera::SetCameraFlashTime(uint16_t i_data) {
-  config->SaveCameraFlashTime(i_data);
-  CameraFlashTime = i_data;
-}
-
 void Camera::SetCameraImageRotation(uint8_t i_data) {
   config->SaveCameraImageExifRotation(i_data);
   imageExifRotation = i_data;
@@ -1061,94 +1468,48 @@ uint8_t Camera::GetFrameSize() {
 }
 
 /**
- * @brief transform framesize_t to uint16_t width
- * 
-    FRAMESIZE_QVGA (320 x 240)
-    FRAMESIZE_CIF (352 x 288)
-    FRAMESIZE_VGA (640 x 480)
-    FRAMESIZE_SVGA (800 x 600)
-    FRAMESIZE_XGA (1024 x 768)
-    FRAMESIZE_SXGA (1280 x 1024)
-    FRAMESIZE_UXGA (1600 x 1200)
- * 
- * @return uint16_t 
- */
-uint16_t Camera::GetFrameSizeWidth() {
-  uint16_t ret = 0;
-
-  switch (FrameSize) {
-    case 0:
-      ret = 320;
-      break;
-    case 1:
-      ret = 352;
-      break;
-    case 2:
-      ret = 640;
-      break;
-    case 3:
-      ret = 800;
-      break;
-    case 4:
-      ret = 1024;
-      break;
-    case 5:
-      ret = 1280;
-      break;
-    case 6:
-      ret = 1600;
-      break;
-    default:
-      ret = 320;
-      break;
-  }
-
-  return ret;
+   @brief Get the size of the last photo that left the camera (upload, SD card, WEB page, stream)
+   @param none
+   @return uint32_t - size [B], 0 = no photo yet
+*/
+uint32_t Camera::GetLastPhotoSize() {
+  return LastPhotoSize;
 }
 
 /**
- * @brief transform framesize_t to uint16_t height
+   @brief Get the resolution of the last photo
+   @param none
+   @return uint8_t - frame size index
+*/
+uint8_t Camera::GetLastPhotoFrameSize() {
+  return LastPhotoFrameSize;
+}
+
+/**
+   @brief Get the JPEG quality of the last photo
+   @param none
+   @return uint8_t - 10-63, lower is better
+*/
+uint8_t Camera::GetLastPhotoQuality() {
+  return LastPhotoQuality;
+}
+
+/**
+ * @brief Width of the selected frame size, from the camera driver resolution table
  * 
-    FRAMESIZE_QVGA (320 x 240)
-    FRAMESIZE_CIF (352 x 288)
-    FRAMESIZE_VGA (640 x 480)
-    FRAMESIZE_SVGA (800 x 600)
-    FRAMESIZE_XGA (1024 x 768)
-    FRAMESIZE_SXGA (1280 x 1024)
-    FRAMESIZE_UXGA (1600 x 1200)
+ * @return uint16_t - width [px]
+ */
+uint16_t Camera::GetFrameSizeWidth() {
+  return resolution[TFrameSize].width;
+}
+
+/**
+ * @brief Height of the selected frame size, from the camera driver resolution table
  * 
- * @return uint16_t 
+ * @return uint16_t - height [px]
  */
 uint16_t Camera::GetFrameSizeHeight() {
-  uint16_t ret = 0;
-  switch (FrameSize) {
-    case 0:
-      ret = 240;
-      break;
-    case 1:
-      ret = 288;
-      break;
-    case 2:
-      ret = 480;
-      break;
-    case 3:
-      ret = 600;
-      break;
-    case 4:
-      ret = 768;
-      break;
-    case 5:
-      ret = 1024;
-      break;
-    case 6:
-      ret = 1200;
-      break;
-    default:
-      ret = 240;
-      break;
-  }
-
-  return ret;
+  return resolution[TFrameSize].height;
 }
 
 /**
@@ -1313,26 +1674,8 @@ bool Camera::GetExposureCtrl() {
   return exposure_ctrl;
 }
 
-/**
-   @brief Get Camera Flash Enable status
-   @param none
-   @return bool - camera flash enable status
-*/
-bool Camera::GetCameraFlashEnable() {
-  return CameraFlashEnable;
-}
-
-/**
- * @brief Get camera flash time
- * @param none
- * @return uint16_t - camera flash time
- */
-uint16_t Camera::GetCameraFlashTime() {
-  return CameraFlashTime;
-}
-
 uint8_t Camera::GetCameraImageRotation() {
   return imageExifRotation;
 }
 
-/* EOF */
+/* EOF */

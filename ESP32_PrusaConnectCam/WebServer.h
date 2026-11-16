@@ -17,6 +17,9 @@
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
+#include <Update.h>
+#include <esp_app_format.h>
+#include <esp_app_desc.h>
 
 #include "micro_sd.h"
 #include "log.h"
@@ -26,12 +29,10 @@
 #include "var.h"
 #include "camera.h"
 #include "cfg.h"
-#include "jquery.h"
 #include "system.h"
 #include "connect.h"
 #include "wifi_mngt.h"
 #include "WebStream.h"
-#include "ExternalTemperatureSensor.h"
 
 extern AsyncWebServer server;  ///< global variable for web server
 
@@ -44,14 +45,16 @@ void Server_InitWebServer_Actions();
 void Server_InitWebServer_Sets();
 void Server_InitWebServer_Update();
 void Server_InitWebServer_Stream();
+String Server_CheckFirmwareImage(const uint8_t *, size_t);
 
-void Server_pause();
-void Server_resume();
 
 void Server_handleCacheRequest(AsyncWebServerRequest*, const char*, const char*);
 void Server_handleNotFound(AsyncWebServerRequest *);
 String Server_GetJsonData();
 bool Server_CheckBasicAuth(AsyncWebServerRequest *);
+bool Server_HostAllowed(AsyncWebServerRequest *);
+bool Server_CheckHost(AsyncWebServerRequest *);
+bool Server_CheckWriteRequest(AsyncWebServerRequest *);
 
 void Server_streamJpg(AsyncWebServerRequest *);
 

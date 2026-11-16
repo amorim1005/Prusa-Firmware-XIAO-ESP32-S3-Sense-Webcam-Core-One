@@ -39,8 +39,6 @@
 
 #include "mcu_cfg.h"
 
-#ifdef CAMERA_MODEL_XIAO_ESP32_S3_CAM
-
 /* --------------- CAMERA CFG -------------------*/
 #define PWDN_GPIO_NUM               -1      ///< Power down control pin
 #define RESET_GPIO_NUM              -1      ///< Reset control pin
@@ -64,24 +62,6 @@
 #define ENABLE_BROWN_OUT_DETECTION  false   ///< Enable brown out detection
 #define ENABLE_PSRAM                true    ///< Enable PSRAM   
 
-/* --------------- OTA UPDATE CFG  --------------*/
-#define OTA_UPDATE_FW_FILE          PSTR("XIAO_ESP32S3.bin") ///< OTA update firmware file name
-#define FW_STATUS_LED_PIN           21      ///< GPIO pin for status FW update LED
-#define FW_STATUS_LED_LEVEL_ON      LOW    ///< GPIO pin level for status LED ON
-
-/* --------------- FLASH LED CFG  ---------------*/
-#define ENABLE_CAMERA_FLASH         true    ///< Enable camera flash function
-#define CAMERA_FLASH_DIGITAL_CTRL   true    ///< Enable camera flash digital control
-#define CAMERA_FLASH_PWM_CTRL       false   ///< Enable camera flash PWM control
-#define CAMERA_FLASH_NEOPIXEL       false   ///< Enable camera flash NeoPixel control
-#define FLASH_GPIO_NUM              4       ///< Flash control pin.
-#define FLASH_NEOPIXEL_LED_PIN      -1      ///< External flash control pin. RGB LED NeoPixel
-#define FLASH_OFF_STATUS            LOW     ///< value for flash OFF
-#define FLASH_ON_STATUS             HIGH    ///< value for flash ON
-//#define FLASH_PWM_FREQ              2000    ///< frequency of pwm [240MHz / (100 prescale * pwm cycles)] = frequency
-//#define FLASH_PWM_CHANNEL           0       ///< channel 0
-//#define FLASH_PWM_RESOLUTION        8       ///< range 1-20bit. 8bit = 0-255 range
-
 /* --------------- SD CARD CFG  ---------------*/
 #define ENABLE_SD_CARD              true    ///< Enable SD card function
 #define SD_PIN_CLK                  7       ///< GPIO pin for SD card clock
@@ -89,7 +69,7 @@
 #define SD_PIN_DATA0                8       ///< GPIO pin for SD card data 0
 
 /* ---------- RESET CFG CONFIGURATION  ----------*/
-#define CFG_RESET_PIN               2       ///< GPIO 1 is for reset CFG to default. This is button UP+`
+#define CFG_RESET_PIN               2       ///< GPIO2 (pad D1) to GND during the start resets the CFG to default
 #define CFG_RESET_LED_PIN           21      ///< GPIO for indication of reset CFG
 #define CFG_RESET_LED_LEVEL_ON      LOW     ///< GPIO pin level for status LED ON
 
@@ -98,9 +78,4 @@
 #define STATUS_LED_GPIO_NUM         21      ///< GPIO pin for status LED
 #define STATUS_LED_OFF_PIN_LEVEL    LOW    ///< GPIO pin level for status LED ON
 
-/* -------------- DHT SENSOR CFG ----------------*/
-#define DHT_SENSOR_ENABLE           true   ///< enable/disable DHT sensor
-#define DHT_SENSOR_PIN              1      ///< GPIO pin for DHT sensor
-
-#endif  // CAMERA_MODEL_XIAO_ESP32_S3_CAM
 /* EOF */

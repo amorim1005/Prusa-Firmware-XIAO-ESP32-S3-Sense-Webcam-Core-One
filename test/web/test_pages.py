@@ -1,0 +1,300 @@
+"""Browser test of the web pages: serves webpage/ with fake camera data and clicks through them in headless Chromium."""
+import http.server
+import json
+import os
+import sys
+import threading
+import urllib.parse
+
+from playwright.sync_api import sync_playwright
+
+WEB = sys.argv[1]
+requests_seen = []
+posts_seen = []      # (path, body) of the POST requests
+WRITE_ROUTES = ('action_', 'set_', 'wifi_cfg', 'wifi_net_cfg', 'wifi_scan', 'wifi_wpa2_eap', 'basicauth_cfg', 'upload_firmware')
+
+STATUS = {
+    "mdns": "prusa-esp32cam", "upload_interval": "10", "fingerprint": "FPRINT123", "token": "****************qrst",
+    "refreshInterval": 10, "photoquality": 12, "framesize": 6, "framesize_supported": "3,4,5,6",
+    "camera_detected": "OV5640", "camera_autofocus": "Continuous",
+    "wpa2_eap": "false", "wpa2_eap_identity": "", "wpa2_eap_user": "student1", "brightness": 0, "contrast": 0, "saturation": 0,
+    "image_rotation": 1, "hmirror": "false", "vflip": "true", "lensc": "true", "exposure_ctrl": "true",
+    "awb": "true", "awb_gain": "true", "wb_mode": 0, "bpc": "false", "wpc": "true", "raw_gama": "true",
+    "aec2": "false", "ae_level": 0, "aec_value": 300, "gain_ctrl": "true", "agc_gain": 0, "timelaps": "false",
+    "prusalink_enable": "true", "prusalink_host": "192.168.1.50", "prusalink_user": "maker",
+    "prusalink_status": "OK", "printer_state": "PRINTING", "job_progress": "42",
+    "auth": "false", "auth_username": "admin", "serviceap": "true", "ssid": "HomeNet", "rssi": -55,
+    "rssi_percentage": 80, "ip": "192.168.1.60", "wifi_network_status": "Connected", "ip_cfg": 0,
+    "net_ip": "192.168.0.10", "net_mask": "255.255.255.0", "net_gw": "192.168.0.1", "net_dns": "8.8.8.8",
+    "uptime": "1 h", "sw_ver": "1.1.2-c10", "sw_build": "today", "last_upload_status": "Photo: 204 - Upload OK",
+    "wifi_mode": "STA", "service_ap_ssid": "ESP32_camera_X", "sd_status": "Card detected", "sd_total": 1000,
+    "sd_free_p": 70, "sd_used_p": 30, "mcu_temp": "55 *C", "health_status": "OK", "upload_ok": 12,
+    "upload_failed": 1, "unplanned_restarts": 0, "last_restart": "Power on", "mcu_temp_max": "60 *C",
+    "mem_internal": "100 KB", "mem_psram": "7000 KB", "log_level": 2, "status_led": 1,
+    "framesize_supported": "4,5,6,9,10", "last_photo_size": 150000, "last_photo_framesize": 4,
+    "last_photo_quality": 12, "photo_max_size": 1000000, "photoquality": 61,
+}
+WIFI = [{"ssid": "HomeNet", "rssi": -55, "rssi_percentage": 80, "channel": 6, "encryption": "WPA2"},
+        {"ssid": "<b>evil</b>", "rssi": -80, "rssi_percentage": 20, "channel": 11, "encryption": "OPEN"}]
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a):
+        pass
+
+    def send(self, body, ctype='text/plain', code=200):
+        data = body.encode() if isinstance(body, str) else body
+        self.send_response(code)
+        self.send_header('Content-Type', ctype)
+        self.send_header('Content-Length', str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):
+        path = urllib.parse.urlparse(self.path).path.lstrip('/') or 'index.html'
+        requests_seen.append(self.path)
+        if path == 'json_input':
+            return self.send(json.dumps(STATUS), 'application/json')
+        if path == 'json_thermal':
+            return self.send(json.dumps({k: STATUS.get(k, 'false') for k in ('mcu_temp', 'thermal_throttling', 'thermal_slow')}), 'application/json')
+        if path == 'json_wifi':
+            return self.send(json.dumps(WIFI), 'application/json')
+        for d in (WEB, os.path.join(WEB, 'assets/icons'), os.path.join(WEB, 'assets/logo')):
+            f = os.path.join(d, path)
+            if os.path.isfile(f):
+                ctype = {'html': 'text/html', 'js': 'application/javascript', 'css': 'text/css', 'svg': 'image/svg+xml'}.get(path.rsplit('.', 1)[-1], 'application/octet-stream')
+                return self.send(open(f, 'rb').read(), ctype)
+        if path == 'stream.mjpg':
+            return self.send('<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"/>', 'image/svg+xml')
+        if path.endswith('.jpg'):
+            return self.send(b'', 'image/jpeg')
+        if path.startswith(WRITE_ROUTES) and self.headers.get('X-Requested-With') != 'PrusaESP32Cam':
+            return self.send('Forbidden: changes are accepted only from the camera page', code=403)   # like the camera (CSRF)
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        if path == 'set_int' and 'framesize' in query:
+            STATUS['framesize'] = int(query['framesize'][0])
+        if path == 'set_int' and 'photo_quality' in query:
+            STATUS['photoquality'] = int(query['photo_quality'][0])
+        if path == 'set_int' and 'fail' in query:
+            return self.send('Save cfg NOT OK!')
+        if path == 'set_token':
+            return self.send('Save OK. Camera registration starts now, it must be done within 15 minutes after adding the camera in Prusa Connect')
+        return self.send('Save cfg OK')   # set_* routes
+
+    def do_POST(self):
+        path = urllib.parse.urlparse(self.path).path.lstrip('/')
+        body = self.rfile.read(int(self.headers.get('Content-Length', 0))).decode(errors='replace')
+        requests_seen.append(self.path)
+        posts_seen.append((self.path, body))
+        if self.headers.get('X-Requested-With') != 'PrusaESP32Cam':
+            return self.send('Forbidden: changes are accepted only from the camera page', code=403)
+        return self.send('Save cfg OK')
+
+
+server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+threading.Thread(target=server.serve_forever, daemon=True).start()
+base = 'http://127.0.0.1:%d/' % server.server_port
+
+failures = []
+SHOTS = os.environ.get('SCREENSHOTS')   # optional folder for screenshots of the photo size estimate
+
+
+def shot(page, name):
+    if SHOTS:
+        page.locator('#photo_size_estimate').scroll_into_view_if_needed()
+        page.screenshot(path=os.path.join(SHOTS, name + '.png'), clip=page.eval_on_selector('#framesizeid', "e => { var t = e.closest('table').getBoundingClientRect(); var r = e.getBoundingClientRect(); return {x: t.x, y: r.y - 60 + window.scrollY - window.scrollY, width: t.width, height: 175}; }"))
+
+
+def check(cond, what):
+    print(('  PASS ' if cond else '  FAIL ') + what)
+    if not cond:
+        failures.append(what)
+
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    page = browser.new_page()
+    errors = []
+    page.on('pageerror', lambda e: errors.append(str(e)))
+    # the browser logs the 404 of GitHub without a release, that is expected
+    page.on('console', lambda m: errors.append(m.text) if (m.type == 'error' and not m.location.get('url', '').startswith('https://api.github.com')) else None)
+    dialogs = []
+    GITHUB = {'status': 404, 'body': '{"message": "Not Found"}'}
+    page.route('https://api.github.com/**', lambda route: route.fulfill(status=GITHUB['status'], content_type='application/json', body=GITHUB['body'], headers={'Access-Control-Allow-Origin': '*'}))
+    page.on('dialog', lambda d: (dialogs.append(d.message), d.accept()))
+
+    print('index + Camera page')
+    page.goto(base)
+    page.wait_for_selector('#tokenid')
+    page.wait_for_function("document.getElementById('tokenid').placeholder != ''")
+    check(page.title() == 'prusa-esp32cam', 'title from json_input')
+    check(page.inner_text('#refreshInterval') == '10', 'upload interval on the main page')
+    check(page.input_value('#tokenid') == '' and page.get_attribute('#tokenid', 'placeholder') == '****************qrst', 'token shown masked, field empty for a new token')
+    check(page.inner_text('#fingerprint') == 'FPRINT123', 'fingerprint text')
+    check(page.inner_text('#camera_detected') == 'OV5640', 'detected sensor text')
+    check(page.inner_text('#camera_autofocus') == 'Continuous', 'autofocus status text')
+    check(page.inner_text('#printer_state') == 'PRINTING' and page.inner_text('#job_progress') == '42 %', 'PrusaLink state and progress')
+    check(page.inner_text('#status_vflip') == 'On', 'switch status text')
+    check(page.is_checked('#prusalinkid'), 'PrusaLink switch checked')
+    check(page.is_checked('#vflipid') and not page.is_checked('#hmirrorid') and not page.is_checked('#bpcid'), 'switches follow "true"/"false" (bug of the original page)')
+    hidden = page.eval_on_selector('#framesizeid', "s => Array.from(s.options).filter(o => o.hidden).length")
+    check(hidden > 0, 'unsupported resolutions hidden')
+    smallest = page.eval_on_selector('#framesizeid', "s => Math.min.apply(null, Array.from(s.options).map(o => parseInt(o.value)))")
+    check(smallest == 4, 'smallest resolution is 1024x768 (index 4): %s' % smallest)
+    check('modified by' in page.inner_text('body') and page.get_attribute('#author-link', 'href') == 'https://github.com/amorim1005', 'footer: modified by amorim1005, linked to the GitHub profile')
+    check(page.get_attribute('#original-author-link', 'href') == 'https://github.com/johnyHV', 'footer: original author linked to his GitHub profile')
+    check(page.query_selector('#ledid') is None and page.query_selector('#flashid') is None, 'no LED / flash controls')
+    check(page.query_selector('#light-icon') is None, 'no light button')
+    check('active' in (page.get_attribute('a[href="page_config.html"]', 'class') or ''), 'Camera tab active')
+
+    print('photo size estimate')
+    est = page.inner_text('#photo_size_estimate')
+    # 150 KB at 1024x768 -> 1600x1200 at the same quality = 150000 * 1920000 / 786432 = 366 KB
+    check(est == 'about 366 KB (based on the last photo)', 'calibrated estimate: %s' % est)
+    check(page.eval_on_selector('#photo_size_estimate', 'e => e.style.color') == 'rgb(46, 125, 50)', 'green under the limit')
+    check(page.inner_text('#photo_size_warning') == '', 'no warning under the limit')
+    shot(page, 'estimate_ok')
+    page.select_option('#framesizeid', '10')
+    page.wait_for_function("document.getElementById('framesizeid').value == '10'")
+    page.eval_on_selector('#photo_qualityid', "s => { s.value = 63; s.dispatchEvent(new Event('input')); }")
+    est = page.inner_text('#photo_size_estimate')
+    warn = page.inner_text('#photo_size_warning')
+    check(est.endswith('MB (based on the last photo)') and float(est.split()[1]) > 1.0, '2592x1944 at the best quality is over 1 MB: %s' % est)
+    check('only supports photos up to 1 MB' in warn, 'warning about the 1 MB limit')
+    shot(page, 'estimate_too_large')
+    check(page.eval_on_selector('#photo_size_warning', 'e => e.style.color') == 'rgb(211, 47, 47)', 'warning in red')
+    page.eval_on_selector('#photo_qualityid', "s => { s.value = 30; s.dispatchEvent(new Event('input')); }")
+    check(page.inner_text('#photo_size_warning') == '', 'lower quality removes the warning: %s' % page.inner_text('#photo_size_estimate'))
+    STATUS['last_photo_size'] = 0
+    STATUS['framesize'] = 6
+    page.evaluate("get_data('config')")
+    page.wait_for_function("document.getElementById('photo_size_estimate').textContent.indexOf('typical') >= 0")
+    check('typical scene, no photo yet' in page.inner_text('#photo_size_estimate'), 'estimate without a photo: %s' % page.inner_text('#photo_size_estimate'))
+    STATUS['last_photo_size'] = 150000
+
+    print('collapsible section')
+    content = page.locator('.btn_collapsible').first
+    before = page.eval_on_selector('.btn_collapsible', "b => getComputedStyle(b.parentElement.nextElementSibling).display")
+    content.click()
+    after = page.eval_on_selector('.btn_collapsible', "b => getComputedStyle(b.parentElement.nextElementSibling).display")
+    check(before == 'none' and after == 'block', 'advanced settings open (%s -> %s)' % (before, after))
+    content.click()
+    again = page.eval_on_selector('.btn_collapsible', "b => getComputedStyle(b.parentElement.nextElementSibling).display")
+    check(again == 'none', 'advanced settings close')
+
+    print('setting a value')
+    requests_seen.clear()
+    page.click('#hmirrorid + .checkbox_slider')
+    page.wait_for_timeout(300)
+    check(any(r.startswith('/set_bool?hmirror=true') for r in requests_seen), 'switch sends set_bool?hmirror=true')
+    check(page.is_visible('#save_status') and page.inner_text('#save_status') == 'Saved \u2714', 'saved confirmation: %s' % page.inner_text('#save_status'))
+    page.wait_for_function("document.getElementById('save_status').style.display == 'none'", timeout=4000)
+    check(True, 'saved confirmation hides itself')
+    page.fill('#tokenid', 'abcdefghijklmnopqrst')
+    page.click('#vflipid + .checkbox_slider')
+    page.wait_for_timeout(300)
+    check(page.input_value('#tokenid') == 'abcdefghijklmnopqrst', 'a pasted token stays when another setting is changed')
+    requests_seen.clear()
+    page.evaluate("saveToken()")
+    check(any(r.startswith('/set_token?token=abcdefghijklmnopqrst') for r in requests_seen), 'token saved')
+    check(page.inner_text('#save_status').startswith('Save OK. Camera registration starts now'), 'token: message with its text instead of a popup')
+    check(page.input_value('#tokenid') == '', 'token field empty after the save')
+    page.evaluate("changeValue(5, 'set_int?fail=', 'config')")
+    check(page.eval_on_selector('#save_status', 'e => e.style.backgroundColor') == 'rgb(211, 47, 47)', 'not saved: red message')
+
+    print('Wi-Fi page')
+    page.click('a[href="page_wifi.html"]')
+    page.wait_for_selector('#wifi_ntw')
+    page.wait_for_function("document.getElementById('wifi_ntw').rows.length == 3", timeout=5000)
+    rows = page.eval_on_selector('#wifi_ntw', "t => Array.from(t.rows).slice(1).map(r => Array.from(r.cells).map(c => c.textContent))")
+    check(rows[0][0] == 'HomeNet' and '80% / -55dBm' in rows[0][1] and rows[0][2] == '6', 'Wi-Fi table row: %s' % rows[0])
+    check(rows[1][0] == '<b>evil</b>', 'SSID shown as text, not HTML')
+    page.wait_for_function("document.getElementById('ssid') && document.getElementById('ssid').textContent == 'HomeNet'")
+    check(page.inner_text('#ip') == '192.168.1.60', 'Wi-Fi status text')
+    check('active' in (page.get_attribute('a[href="page_wifi.html"]', 'class') or ''), 'Wi-Fi tab active')
+
+    check(page.input_value('#wpa2_eap_user_id') == 'student1' and not page.is_checked('#wpa2_eapid'), 'Wi-Fi Enterprise fields filled, switch off')
+    check(page.get_attribute('#wpa2_eap_pass_id', 'placeholder') == 'unchanged' and page.get_attribute('#wpa2_eap_pass_id', 'type') == 'password', 'Enterprise password hidden, empty = unchanged')
+    posts_seen.clear()
+    page.evaluate("setWPA2EAP('Campus', '', 'student1', 'p@ss word')")
+    check(posts_seen and posts_seen[-1][0] == '/wifi_wpa2_eap' and 'ssid=Campus' in posts_seen[-1][1] and 'pass=p%40ss%20word' in posts_seen[-1][1], 'Enterprise saved with POST, SSID and password in the body: %s' % posts_seen)
+    check(page.inner_text('#save_status') == 'Saved \u2714', 'Enterprise saved message')
+
+    print('Authentication page')
+    page.click('a[href="page_auth.html"]')
+    page.wait_for_function("document.getElementById('auth_username') && document.getElementById('auth_username').value == 'admin'")
+    check(True, 'auth page filled')
+    check(page.get_attribute('#auth_password', 'placeholder') == 'unchanged' and page.get_attribute('#auth_password_confirm', 'placeholder') == 'unchanged', 'empty password fields keep the password')
+    posts_seen.clear()
+    page.evaluate("setAuth('admin', 'se cret&1')")
+    check(posts_seen and posts_seen[-1][0] == '/basicauth_cfg' and 'auth_password=se%20cret%261' in posts_seen[-1][1], 'login saved with POST, the password in the body: %s' % posts_seen)
+    check(page.inner_text('#save_status') == 'Saved \u2714', 'login saved with the camera page header')
+    page.fill('#auth_password', 'secret')
+    page.fill('#auth_password_confirm', 'secret')
+    check(page.inner_text('#pass_match').startswith('\u2714'), 'password match mark is a check mark, not broken characters: %r' % page.inner_text('#pass_match'))
+
+    print('System page')
+    page.click('a[href="page_system.html"]')
+    page.wait_for_function("document.getElementById('upload_ok') && document.getElementById('upload_ok').textContent == '12'")
+    check(page.inner_text('#health_status') == 'OK', 'health status')
+    check(page.inner_text('#sw_ver') == '1.1.2-c10', 'installed version')
+    check('v1.1.2' in page.inner_text('#content') and 'Based on' in page.inner_text('#content'), 'based on the original v1.1.2')
+    page.wait_for_timeout(500)
+    check(not page.is_visible('#latest_release_row'), 'no release on GitHub (404): nothing shown')
+    for body, what in (('{"tag_name": "v1.1.2-c10", "html_url": "https://github.com/x"}', 'same version: nothing shown'),
+                       ('{"tag_name": "v1.1.2-c9", "html_url": "https://github.com/x"}', 'older release: nothing shown')):
+        GITHUB.update({'status': 200, 'body': body})
+        page.evaluate("LatestRelease = null; checkLatestRelease('1.1.2-c10')")
+        page.wait_for_timeout(500)
+        check(not page.is_visible('#latest_release_row'), what)
+    GITHUB.update({'status': 200, 'body': '{"tag_name": "v1.1.2-c15", "html_url": "https://github.com/amorim1005/Prusa-Firmware-XIAO-ESP32-S3-Sense-Webcam-Core-One/releases/tag/v1.1.2-c15"}'})
+    page.evaluate("LatestRelease = null; checkLatestRelease('1.1.2-c10')")
+    page.wait_for_function("document.getElementById('latest_release_row').style.display == ''")
+    check(page.inner_text('#latest_release') == 'There is a new version. Latest release: 1.1.2-c15', 'newer release shown: %s' % page.inner_text('#latest_release'))
+    check(page.get_attribute('#latest_release a', 'href').endswith('/v1.1.2-c15'), 'newer release linked')
+    check(page.eval_on_selector('#progress_bar_sd_used', 'e => e.style.width') == '30%', 'SD progress bar')
+    check(page.input_value('#status_ledid') == '1', 'status LED mode shown')
+    requests_seen.clear()
+    page.select_option('#status_ledid', '2')
+    page.wait_for_timeout(300)
+    check(any(r.startswith('/set_int?status_led=2') for r in requests_seen), 'status LED mode sends set_int?status_led=2')
+    page.evaluate("changeValue(1, 'set_int?fail=', 'system')")
+    check(page.inner_text('#save_status') == 'Not saved \u2716', 'not saved message: %s' % page.inner_text('#save_status'))
+
+    print('licence page (footer)')
+    page.click('a.page-link')
+    page.wait_for_function("document.getElementById('content').textContent.indexOf('GNU') >= 0 || document.getElementById('content').textContent.indexOf('licen') >= 0")
+    check(True, 'licence loaded in the content')
+    check(page.query_selector('a[href="gtac.html"]') is None, 'no Prusa legal links')
+    gh = page.get_attribute('#github-link', 'href')
+    check('amorim1005' in gh, 'GitHub link to the fork')
+
+    print('stream page')
+    check(page.query_selector('button[onclick*="stream.html"]') is not None, 'Start stream opens stream.html')
+    STATUS.update({"thermal_throttling": "false", "thermal_slow": "false", "mcu_temp": "70 *C"})
+    page.goto(base + 'stream.html')
+    page.wait_for_function("document.getElementById('stream').naturalWidth > 0")
+    page.wait_for_timeout(300)
+    check(not page.is_visible('#stream_msg'), 'no message while the camera is cool')
+    STATUS.update({"thermal_slow": "true", "mcu_temp": "82 *C"})
+    page.evaluate("streamCheck()")
+    page.wait_for_function("document.getElementById('stream_msg').textContent.indexOf('1 frame per second') >= 0")
+    check('82 *C' in page.inner_text('#stream_msg'), 'hot: slow stream message with the temperature')
+    STATUS.update({"thermal_throttling": "true", "mcu_temp": "89 *C - TOO HOT, stream disabled, uploads slowed down"})
+    page.evaluate("streamCheck()")
+    page.wait_for_function("document.getElementById('stream_msg').textContent.indexOf('too hot') >= 0")
+    check(page.get_attribute('#stream', 'src') is None, 'too hot: stream stopped')
+    check('(89 *C)' in page.inner_text('#stream_msg'), 'too hot message shows only the temperature: %s' % page.inner_text('#stream_msg'))
+    STATUS.update({"thermal_throttling": "false", "thermal_slow": "false", "mcu_temp": "74 *C"})
+    page.evaluate("streamCheck()")
+    page.wait_for_function("(document.getElementById('stream').getAttribute('src') || '').indexOf('stream.mjpg') == 0")
+    page.wait_for_function("document.getElementById('stream_msg').style.display == 'none'")
+    check(True, 'cooled down: stream started again, message hidden')
+
+    print('no jQuery requested, no JavaScript errors')
+    check(not any('jquery' in r for r in requests_seen), 'jquery never requested')
+    check(not errors, 'no errors: %s' % errors)
+    check(not dialogs, 'no popups after saving: %s' % dialogs)
+    browser.close()
+
+print('\n%s: %d failure(s)' % ('FAILED' if failures else 'ALL PASSED', len(failures)))
+sys.exit(1 if failures else 0)

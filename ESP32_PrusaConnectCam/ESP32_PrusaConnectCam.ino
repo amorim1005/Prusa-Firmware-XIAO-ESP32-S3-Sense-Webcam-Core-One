@@ -13,9 +13,8 @@
    - ArduinoJson       - MIT      - 7.3.0   - https://github.com/bblanchon/ArduinoJson
    - ArduinoUniqueID   - MIT      - 1.3.0   - https://github.com/ricaun/ArduinoUniqueID
    - arduino-esp32     - LGPL 2.1 - 3.1.0   - https://github.com/espressif/arduino-esp32
-   - DHTnew            - MIT      - 0.5.2   - https://github.com/RobTillaart/DHTNew
 
-   Arduino IDE configuration for the MCU are stored in the module_XXX.h file.
+   Arduino IDE configuration and the pins of the board are in the module_XIAO_ESP32-S3-cam.h file.
 
    When flashing the firmware to a new, empty ESP32-CAM device for the first time, it is necessary to use the 'Erase' function.
    This can be found under 'Tools' -> 'Erase all Flash Before Sketch Upload' -> 'Enable'.
@@ -63,7 +62,8 @@ void setup() {
   /* Init EEPROM */
   EEPROM.begin(EEPROM_SIZE);
 
-  /* init system led */
+  /* init system led, the mode is read before the log and the cfg module, like the log level */
+  system_led.setMode(EEPROM.read(EEPROM_ADDR_STATUS_LED_MODE_START));
   system_led.init();
 
   /* init micro SD card and logs */
@@ -80,6 +80,7 @@ void setup() {
   Server_LoadCfg();
   SystemCamera.LoadCameraCfgFromEeprom();
   Connect.LoadCfgFromEeprom();
+  SystemPrusaLink.LoadCfgFromEeprom();
   SystemWifiMngt.LoadCfgFromEeprom();
 
   /* init WiFi mngt */
@@ -96,9 +97,6 @@ void setup() {
   /* init class for communication with PrusaConnect */
   Connect.Init();
 
-  /* init external temperature sensor */
-  ExternalTemperatureSensor.Init();
-
   /* init wdg */
   SystemLog.AddEvent(LogLevel_Info, F("Init WDG"));
   esp_task_wdt_config_t twdt_config;
@@ -113,9 +111,10 @@ void setup() {
 
   /* init tasks */
   SystemLog.AddEvent(LogLevel_Info, F("Start tasks"));
-  xTaskCreatePinnedToCore(System_TaskMain, "SystemNtpOtaUpdate", 5200, NULL, 1, &Task_SystemMain, 0);                           /*function, description, stack size, parameters, priority, task handle, core*/
+  xTaskCreatePinnedToCore(System_TaskMain, "SystemMain", 4096, NULL, 1, &Task_SystemMain, 0);                           /*function, description, stack size, parameters, priority, task handle, core*/
   ESP_ERROR_CHECK(esp_task_wdt_add(Task_SystemMain));
-  xTaskCreatePinnedToCore(System_TaskCaptureAndSendPhoto, "CaptureAndSendPhoto", 4400, NULL, 2, &Task_CapturePhotoAndSend, 0);  /*function, description, stack size, parameters, priority, task handle, core*/
+  /* photo capture, TLS upload and PrusaLink polling run on core 1. Core 0 runs the WiFi stack and the other tasks */
+  xTaskCreatePinnedToCore(System_TaskCaptureAndSendPhoto, "CaptureAndSendPhoto", 7168, NULL, 2, &Task_CapturePhotoAndSend, 1);  /*function, description, stack size, parameters, priority, task handle, core*/
   ESP_ERROR_CHECK(esp_task_wdt_add(Task_CapturePhotoAndSend));
   xTaskCreatePinnedToCore(System_TaskWifiManagement, "WiFiManagement", 2700, NULL, 3, &Task_WiFiManagement, 0);                 /*function, description, stack size, parameters, priority, task handle, core*/
   ESP_ERROR_CHECK(esp_task_wdt_add(Task_WiFiManagement));
@@ -131,6 +130,7 @@ void setup() {
   ESP_ERROR_CHECK(esp_task_wdt_add(Task_SysLed));
   xTaskCreatePinnedToCore(System_TaskWiFiWatchdog, "WiFiWatchdog", 2200, NULL, 8, &Task_WiFiWatchdog, 0);                       /*function, description, stack size, parameters, priority, task handle, core*/
   ESP_ERROR_CHECK(esp_task_wdt_add(Task_WiFiWatchdog));
+  SystemCamera.StartStreamTask();
   //xTaskCreatePinnedToCore(System_TaskSdCardRemove, "SdCardRemove", 3000, NULL, 9, &Task_SdCardFileRemove, 0);                   /*function, description, stack size, parameters, priority, task handle, core*/
   //esp_task_wdt_add(Task_SdCardFileRemove);
 

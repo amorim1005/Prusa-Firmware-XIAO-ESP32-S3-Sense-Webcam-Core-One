@@ -40,49 +40,18 @@ void Server_InitWebServer() {
     if (Server_CheckBasicAuth(request) == false)
       return;
 
-    if (SystemCamera.GetCameraCaptureSuccess() == false) {
+    /* the response sends its own copy of the photo, the camera can capture a new photo during the transfer */
+    uint8_t* photo = NULL;
+    size_t photo_len = 0;
+    if (false == SystemCamera.GetSavedPhotoCopy(&photo, &photo_len)) {
       request->send(404, "text/plain", "Photo not found!");
       return;
     }
-    SystemCamera.SetPhotoSending(true);
 
-    SystemLog.AddEvent(LogLevel_Verbose, "Photo size: " + String(SystemCamera.GetPhotoFb()->len) + " bytes");
-
-    if (SystemCamera.GetPhotoExifData()->header != NULL) {
-      /* send photo with exif data */
-      SystemLog.AddEvent(LogLevel_Verbose, F("Send photo with EXIF data"));
-      size_t total_len = SystemCamera.GetPhotoExifData()->len + SystemCamera.GetPhotoFb()->len - SystemCamera.GetPhotoExifData()->offset;
-      auto response = request->beginChunkedResponse("image/jpg", [total_len](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
-        size_t len = 0;
-        if (index < SystemCamera.GetPhotoExifData()->len) {
-          len = min(maxLen, SystemCamera.GetPhotoExifData()->len - index);
-          memcpy(buffer, SystemCamera.GetPhotoExifData()->header + index, len);
-        } else {
-          size_t offset = index - SystemCamera.GetPhotoExifData()->len + SystemCamera.GetPhotoExifData()->offset;
-          len = min(maxLen, SystemCamera.GetPhotoFb()->len - offset);
-          memcpy(buffer, SystemCamera.GetPhotoFb()->buf + offset, len);
-        }
-        return len;
-      });
-      response->addHeader("Content-Length", String(total_len));
-      request->send(response);
-
-    } else {
-      /* send photo without exif data */
-      SystemLog.AddEvent(LogLevel_Verbose, F("Send photo without EXIF data"));
-      request->send(200, "image/jpg", SystemCamera.GetPhotoFb()->buf, SystemCamera.GetPhotoFb()->len);
-    }
-
-    SystemCamera.SetPhotoSending(false);
-  });
-
-  /* route to jquery */
-  server.on("/jquery-3.7.0.min.js", HTTP_GET, [](AsyncWebServerRequest* request) {
-    SystemLog.AddEvent(LogLevel_Verbose, F("WEB server: Get jquery-3.7.0.min.js"));
-    if (Server_CheckBasicAuth(request) == false)
-      return;
-
-    Server_handleCacheRequest(request, "application/javascript", jquery_3_7_0_js);
+    SystemLog.AddEvent(LogLevel_Verbose, "Photo size: " + String(photo_len) + " bytes");
+    AsyncBufferResponse* response = new AsyncBufferResponse(photo, photo_len, "image/jpeg");
+    response->addHeader("Cache-Control", "no-store");
+    request->send(response);
   });
 
   Server_InitWebServer_JsonData();
@@ -111,7 +80,21 @@ void Server_InitWebServer_JsonData() {
     SystemLog.AddEvent(LogLevel_Verbose, F("WEB server: get json_input"));
     if (Server_CheckBasicAuth(request) == false)
       return;
-    request->send(200, F("text/plain"), Server_GetJsonData().c_str());
+    request->send(200, F("application/json"), Server_GetJsonData().c_str());
+  });
+
+  /* route for a small json with the MCU temperature, the stream page asks it every few seconds */
+  server.on("/json_thermal", HTTP_GET, [](AsyncWebServerRequest* request) {
+    SystemLog.AddEvent(LogLevel_Verbose, F("WEB server: get json_thermal"));
+    if (Server_CheckBasicAuth(request) == false)
+      return;
+    JsonDocument doc_json;
+    String string_json = "";
+    doc_json["mcu_temp"] = String(McuTemperature.TemperatureCelsius) + " *C";
+    doc_json["thermal_throttling"] = Server_TranslateBoolToString(McuTemperature.ThermalThrottling);
+    doc_json["thermal_slow"] = Server_TranslateBoolToString(McuTemperature.StreamSlow);
+    serializeJson(doc_json, string_json);
+    request->send(200, F("application/json"), string_json.c_str());
   });
 
   /* route for json with wifi networks */
@@ -119,32 +102,16 @@ void Server_InitWebServer_JsonData() {
     SystemLog.AddEvent(LogLevel_Verbose, F("WEB server: get json_wifi"));
     if (Server_CheckBasicAuth(request) == false)
       return;
-    request->send(200, F("text/plain"), SystemWifiMngt.GetAvailableWifiNetworks().c_str());
+    request->send(200, F("application/json"), SystemWifiMngt.GetAvailableWifiNetworks().c_str());
   });
 
   /* route for san wi-fi networks */
   server.on("/wifi_scan", HTTP_GET, [](AsyncWebServerRequest* request) {
-    SystemLog.AddEvent(LogLevel_Verbose, F("WEB server: scan WI-FI networks"));
-    if (Server_CheckBasicAuth(request) == false)
+    SystemLog.AddEvent(LogLevel_Verbose, F("WEB server: scan Wi-Fi networks"));
+    if (Server_CheckWriteRequest(request) == false)
       return;
     request->send(200, F("text/html"), MSG_SCANNING);
     SystemWifiMngt.ScanWiFiNetwork();
-  });
-
-  /* route for firmware update processing status */
-  server.on("/UpdateProcessing", HTTP_GET, [](AsyncWebServerRequest* request) {
-    if (Server_CheckBasicAuth(request) == false)
-      return;
-
-    JsonDocument doc_json;
-    doc_json["processed_bytes"] = String(FirmwareUpdate.TransferedBytes);
-    doc_json["processed_percent"] = String(FirmwareUpdate.PercentProcess);
-    doc_json["updating"] = FirmwareUpdate.Processing;
-    doc_json["message"] = FirmwareUpdate.UpdatingStatus;
-    String string_json = "";
-    serializeJson(doc_json, string_json);
-
-    request->send(200, "application/json", string_json);
   });
 }
 
@@ -177,7 +144,7 @@ void Server_InitWebServer_WebPages() {
     SystemLog.AddEvent(LogLevel_Verbose, F("WEB server: Get scripts.js"));
     if (Server_CheckBasicAuth(request) == false)
       return;
-    request->send(200, "application/javascript", scripts_js);
+    Server_handleCacheRequest(request, "application/javascript; charset=utf-8", scripts_js);
   });
 
 
@@ -217,15 +184,6 @@ void Server_InitWebServer_WebPages() {
     Server_handleCacheRequest(request, "text/html", page_system_html);
   });
 
-  /* route for temperature web page */
-  server.on("/page_temperature.html", HTTP_GET, [](AsyncWebServerRequest* request) {
-    SystemLog.AddEvent(LogLevel_Verbose, F("WEB server: Get page_temperature.html"));
-    if (Server_CheckBasicAuth(request) == false)
-      return;
-
-    Server_handleCacheRequest(request, "text/html", page_temperature_html);
-  });
-
   /* route to license page */
   server.on("/license.html", HTTP_GET, [](AsyncWebServerRequest* request) {
     SystemLog.AddEvent(LogLevel_Verbose, F("WEB server: Get license.html"));
@@ -235,31 +193,13 @@ void Server_InitWebServer_WebPages() {
     Server_handleCacheRequest(request, "text/html", license_html);
   });
 
-  /* route to gtac page */
-  server.on("/gtac.html", HTTP_GET, [](AsyncWebServerRequest* request) {
-    SystemLog.AddEvent(LogLevel_Verbose, F("WEB server: Get gtac.html"));
+  /* route to the stream page: the stream with a message when the camera is too hot */
+  server.on("/stream.html", HTTP_GET, [](AsyncWebServerRequest* request) {
+    SystemLog.AddEvent(LogLevel_Verbose, F("WEB server: Get stream.html"));
     if (Server_CheckBasicAuth(request) == false)
       return;
 
-    Server_handleCacheRequest(request, "text/html", gtac_html);
-  });
-
-  /* route to privacy policy page */
-  server.on("/privacypolicy.html", HTTP_GET, [](AsyncWebServerRequest* request) {
-    SystemLog.AddEvent(LogLevel_Verbose, F("WEB server: Get privacypolicy.html"));
-    if (Server_CheckBasicAuth(request) == false)
-      return;
-
-    Server_handleCacheRequest(request, "text/html", privacypolicy_html);
-  });
-
-  /* route to cookie page */
-  server.on("/cookie.html", HTTP_GET, [](AsyncWebServerRequest* request) {
-    SystemLog.AddEvent(LogLevel_Verbose, F("WEB server: Get cookie.html"));
-    if (Server_CheckBasicAuth(request) == false)
-      return;
-
-    Server_handleCacheRequest(request, "text/html", cookies_html);
+    Server_handleCacheRequest(request, "text/html", stream_html);
   });
 
   /* route to logs page */
@@ -274,24 +214,6 @@ void Server_InitWebServer_WebPages() {
     } else {
       request->send(404, "text/plain", "Micro SD card not found with FAT32 partition!");
     }
-  });
-
-  /* route to get temperature */
-  server.on("/get_temp", HTTP_GET, [](AsyncWebServerRequest* request) {
-    SystemLog.AddEvent(LogLevel_Verbose, F("WEB server: Get get_temp"));
-    if (Server_CheckBasicAuth(request) == false)
-      return;
-
-    request->send(200, "text/plain", String(ExternalTemperatureSensor.GetTemperature()));
-  });
-
-  /* route to get humidity */
-  server.on("/get_hum", HTTP_GET, [](AsyncWebServerRequest* request) {
-    SystemLog.AddEvent(LogLevel_Verbose, F("WEB server: Get get_hum"));
-    if (Server_CheckBasicAuth(request) == false)
-      return;
-
-    request->send(200, "text/plain", String(ExternalTemperatureSensor.GetHumidity()));
   });
 }
 
@@ -317,24 +239,6 @@ void Server_InitWebServer_Icons() {
       return;
 
     Server_handleCacheRequest(request, "image/svg+xml", github_icon_svg);
-  });
-
-  /* route to light on icon */
-  server.on("/light-on-icon.svg", HTTP_GET, [](AsyncWebServerRequest* request) {
-    SystemLog.AddEvent(LogLevel_Verbose, F("WEB server: Get light-icon.svg"));
-    if (Server_CheckBasicAuth(request) == false)
-      return;
-
-    Server_handleCacheRequest(request, "image/svg+xml", light_icon_on_svg);
-  });
-
-  /* route to light off icon */
-  server.on("/light-off-icon.svg", HTTP_GET, [](AsyncWebServerRequest* request) {
-    SystemLog.AddEvent(LogLevel_Verbose, F("WEB server: Get light-icon.svg"));
-    if (Server_CheckBasicAuth(request) == false)
-      return;
-
-    Server_handleCacheRequest(request, "image/svg+xml", light_icon_off_svg);
   });
 
   /* route to refresh icon */
@@ -437,7 +341,7 @@ void Server_InitWebServer_Actions() {
   /*route for capture photo */
   server.on("/action_capture", HTTP_GET, [](AsyncWebServerRequest* request) {
     SystemLog.AddEvent(LogLevel_Verbose, F("WEB server: /action_capture Take photo"));
-    if (Server_CheckBasicAuth(request) == false)
+    if (Server_CheckWriteRequest(request) == false)
       return;
     SystemCamera.CapturePhoto();
     request->send(200, "text/plain", "Take Photo");
@@ -446,74 +350,16 @@ void Server_InitWebServer_Actions() {
   /* route for send photo to prusa backend */
   server.on("/action_send", HTTP_GET, [](AsyncWebServerRequest* request) {
     SystemLog.AddEvent(LogLevel_Verbose, F("WEB server: /action_send send photo to cloud"));
-    if (Server_CheckBasicAuth(request) == false)
+    if (Server_CheckWriteRequest(request) == false)
       return;
     Connect.SetSendingIntervalExpired();
     request->send(200, "text/plain", "Send Photo");
   });
 
-  /* route for change LED status */
-  server.on("/action_led", HTTP_GET, [](AsyncWebServerRequest* request) {
-    SystemLog.AddEvent(LogLevel_Verbose, F("WEB server: /action_led Change LED status"));
-    if (Server_CheckBasicAuth(request) == false)
-      return;
-
-    SystemCamera.SetFlashStatus(!SystemCamera.GetFlashStatus());
-    SystemCamera.SetCameraFlashEnable(false);
-
-    request->send(200, "text/plain", "Change LED status");
-  });
-
-  /* route for change LED status */
-  server.on("/light", HTTP_GET, [](AsyncWebServerRequest* request) {
-    SystemLog.AddEvent(LogLevel_Verbose, F("WEB server: /light set LED status"));
-    if (Server_CheckBasicAuth(request) == false)
-      return;
-
-    if (request->hasArg("on")) {
-      SystemLog.AddEvent(LogLevel_Verbose, F("Turning light ON"));
-      SystemCamera.SetFlashStatus(true);
-      SystemCamera.SetCameraFlashEnable(false);
-      request->send(200, "text/plain", "Light ON");
-
-    } else if (request->hasArg("off")) {
-      SystemLog.AddEvent(LogLevel_Verbose, F("Turning light OFF"));
-      SystemCamera.SetFlashStatus(false);
-      SystemCamera.SetCameraFlashEnable(false);
-      request->send(200, "text/plain", "Light OFF");
-
-    } else {
-      request->send(400, "text/plain", "Invalid request");
-    }
-  });
-
-  /* route for change FLASH status */
-  server.on("/flash", HTTP_GET, [](AsyncWebServerRequest* request) {
-    SystemLog.AddEvent(LogLevel_Verbose, F("WEB server: /flash set flash status"));
-    if (Server_CheckBasicAuth(request) == false)
-      return;
-
-    if (request->hasArg("on")) {
-      SystemLog.AddEvent(LogLevel_Verbose, F("Turning flash ON"));
-      SystemCamera.SetCameraFlashEnable(true);
-      SystemCamera.SetFlashStatus(false);
-      request->send(200, "text/plain", "Flash ON");
-
-    } else if (request->hasArg("off")) {
-      SystemLog.AddEvent(LogLevel_Verbose, F("Turning flash OFF"));
-      SystemCamera.SetCameraFlashEnable(false);
-      SystemCamera.SetFlashStatus(false);
-      request->send(200, "text/plain", "Flash OFF");
-
-    } else {
-      request->send(400, "text/plain", "Invalid request");
-    }
-  });
-
   /* reboot MCU */
   server.on("/action_reboot", HTTP_GET, [](AsyncWebServerRequest* request) {
     SystemLog.AddEvent(LogLevel_Verbose, F("WEB server: /action_reboo reboot MCU!"));
-    if (Server_CheckBasicAuth(request) == false)
+    if (Server_CheckWriteRequest(request) == false)
       return;
     request->send(200, F("text/html"), MSG_REBOOT_MCU);
     delay(100); /* wait for sending data */
@@ -523,7 +369,7 @@ void Server_InitWebServer_Actions() {
   /* route for change LED status */
   server.on("/action_sderase", HTTP_GET, [](AsyncWebServerRequest* request) {
     SystemLog.AddEvent(LogLevel_Verbose, F("WEB server: /action_sderase remove files from SD card"));
-    if (Server_CheckBasicAuth(request) == false)
+    if (Server_CheckWriteRequest(request) == false)
       return;
 
     StartRemoveSdCard = 1;
@@ -541,7 +387,7 @@ void Server_InitWebServer_Sets() {
   /* route to set integer value */
   server.on("/set_int", HTTP_GET, [](AsyncWebServerRequest* request) {
     SystemLog.AddEvent(LogLevel_Verbose, F("WEB server: /set_int"));
-    if (Server_CheckBasicAuth(request) == false)
+    if (Server_CheckWriteRequest(request) == false)
       return;
 
     bool response = false;
@@ -550,12 +396,12 @@ void Server_InitWebServer_Sets() {
     /* set refresh interval */
     if (request->hasParam("refresh")) {
       SystemLog.AddEvent(LogLevel_Verbose, F("Set refresh interval"));
-      uint8_t value = request->getParam("refresh")->value().toInt();
-      if ((value >= REFRESH_INTERVAL_MIN) && (value <= REFRESH_INTERVAL_MAX)) {
-        Connect.SetRefreshInterval(value);
+      long value = request->getParam("refresh")->value().toInt();
+      if ((value > 0) && (value <= UINT16_MAX) && Connect.CheckRefreshInterval((uint16_t)value)) {
+        Connect.SetRefreshInterval((uint16_t)value);
         response_msg = MSG_SAVE_OK;
       } else {
-        response_msg = "ERROR! Bad value. Minimum is " + String(REFRESH_INTERVAL_MIN) + ", maximum " + String(REFRESH_INTERVAL_MAX) + " second";
+        response_msg = "ERROR! Bad value. Allowed values are " + String(REFRESH_INTERVAL_TEN_SEC) + ", " + String(REFRESH_INTERVAL_THIRTY_SEC) + ", " + String(REFRESH_INTERVAL_SIXTY_SEC) + " or " + String(REFRESH_INTERVAL_TEN_MIN) + " second";
       }
       response = true;
     }
@@ -587,24 +433,26 @@ void Server_InitWebServer_Sets() {
     /* set frame size */
     if (request->hasParam("framesize")) {
       SystemLog.AddEvent(LogLevel_Verbose, F("Set framesize"));
-      SystemCamera.SetFrameSize(request->getParam("framesize")->value().toInt());
-      response_msg = MSG_SAVE_OK;
+      if (SystemCamera.SetFrameSize(request->getParam("framesize")->value().toInt())) {
+        Connect.UpdateDeviceInformation();
+        response_msg = MSG_SAVE_OK;
+      } else {
+        response_msg = "ERROR! This resolution is not supported by the camera sensor " + SystemCamera.GetDetectedSensorName();
+      }
       response = true;
     }
 
     /* set photo quality */
     if (request->hasParam("photo_quality")) {
       SystemLog.AddEvent(LogLevel_Verbose, F("Set photo_quality"));
-      SystemCamera.SetPhotoQuality(73 - request->getParam("photo_quality")->value().toInt());
-      response_msg = MSG_SAVE_OK;
-      response = true;
-    }
-
-    /* set flash time */
-    if (request->hasParam("flash_time")) {
-      SystemLog.AddEvent(LogLevel_Verbose, F("Set flash_time"));
-      SystemCamera.SetCameraFlashTime(request->getParam("flash_time")->value().toInt());
-      response_msg = MSG_SAVE_OK;
+      /* the slider is reversed (right = better), check its range before the conversion, a wrapped value could look valid */
+      long value = request->getParam("photo_quality")->value().toInt();
+      if ((value >= CAMERA_JPEG_QUALITY_MIN) && (value <= CAMERA_JPEG_QUALITY_MAX) &&
+          SystemCamera.SetPhotoQuality((CAMERA_JPEG_QUALITY_MIN + CAMERA_JPEG_QUALITY_MAX) - value)) {
+        response_msg = MSG_SAVE_OK;
+      } else {
+        response_msg = "ERROR! Image quality must be " + String(CAMERA_JPEG_QUALITY_MIN) + " to " + String(CAMERA_JPEG_QUALITY_MAX);
+      }
       response = true;
     }
 
@@ -644,7 +492,22 @@ void Server_InitWebServer_Sets() {
     if (request->hasParam("image_rotation")) {
       SystemLog.AddEvent(LogLevel_Verbose, F("Set image EXIF rotation"));
       SystemCamera.SetCameraImageRotation(request->getParam("image_rotation")->value().toInt());
+      Connect.UpdateDeviceInformation();
       response_msg = MSG_SAVE_OK;
+      response = true;
+    }
+
+    /* set status LED mode /set_int?status_led=1 */
+    if (request->hasParam("status_led")) {
+      SystemLog.AddEvent(LogLevel_Verbose, F("Set status_led"));
+      uint8_t mode = request->getParam("status_led")->value().toInt();
+      if (mode <= STATUS_LED_MODE_OFF) {
+        SystemConfig.SaveStatusLedMode(mode);
+        system_led.setMode(mode);
+        response_msg = MSG_SAVE_OK;
+      } else {
+        response_msg = MSG_SAVE_NOTOK;
+      }
       response = true;
     }
 
@@ -672,14 +535,6 @@ void Server_InitWebServer_Sets() {
       response = true;
     }
 
-    /* set saturation */
-    if (request->hasParam("temp_unit")) {
-      SystemLog.AddEvent(LogLevel_Verbose, F("Set temp_unit"));
-      ExternalTemperatureSensor.SetUnit((TemperatureSensorUnit_enum) request->getParam("temp_unit")->value().toInt());
-      response_msg = MSG_SAVE_OK;
-      response = true;
-    }
-
     if (true == response) {
       request->send(200, F("text/html"), response_msg.c_str());
     }
@@ -688,7 +543,7 @@ void Server_InitWebServer_Sets() {
   /* route to set bool value */
   server.on("/set_bool", HTTP_GET, [](AsyncWebServerRequest* request) {
     SystemLog.AddEvent(LogLevel_Verbose, F("WEB server: /set_bool"));
-    if (Server_CheckBasicAuth(request) == false)
+    if (Server_CheckWriteRequest(request) == false)
       return;
 
     bool response = false;
@@ -770,18 +625,20 @@ void Server_InitWebServer_Sets() {
       response = true;
     }
 
-    /* set flash */
-    if (request->hasParam("flash")) {
-      SystemLog.AddEvent(LogLevel_Verbose, F("Set flash"));
-      SystemCamera.SetCameraFlashEnable(Server_TransfeStringToBool(request->getParam("flash")->value()));
-      SystemCamera.SetFlashStatus(false);
-      response = true;
-    }
-
     /* set service AP */
     if (request->hasParam("serviceap_enable")) {
       SystemLog.AddEvent(LogLevel_Verbose, F("Set service AP enable"));
       SystemWifiMngt.SetEnableServiceAp(Server_TransfeStringToBool(request->getParam("serviceap_enable")->value()));
+      response = true;
+    }
+
+    /* set Wi-Fi Enterprise (PEAP) enable */
+    if (request->hasParam("wpa2_eap_enable")) {
+      SystemLog.AddEvent(LogLevel_Verbose, F("Set Wi-Fi Enterprise enable"));
+      if (false == SystemWifiMngt.SetStaEapEnable(Server_TransfeStringToBool(request->getParam("wpa2_eap_enable")->value()))) {
+        request->send(200, F("text/html"), MSG_WIFI_EAP_NOT_CFG);
+        return;
+      }
       response = true;
     }
 
@@ -801,13 +658,6 @@ void Server_InitWebServer_Sets() {
       response = true;
     }
 
-    /* set external temperature sensor enable */
-    if (request->hasParam("extsens_enable")) {
-      SystemLog.AddEvent(LogLevel_Verbose, F("Set enable ext temperature"));
-      ExternalTemperatureSensor.EnableSensor(Server_TransfeStringToBool(request->getParam("extsens_enable")->value()));
-      response = true;
-    }
-
     if (true == response) {
       request->send(200, F("text/html"), MSG_SAVE_OK);
     }
@@ -816,19 +666,76 @@ void Server_InitWebServer_Sets() {
   /* route for set token for authentification to prusa backend*/
   server.on("/set_token", HTTP_GET, [](AsyncWebServerRequest* request) {
     SystemLog.AddEvent(LogLevel_Verbose, F("WEB server: /set_token"));
-    if (Server_CheckBasicAuth(request) == false)
+    if (Server_CheckWriteRequest(request) == false)
       return;
-    request->send(200, F("text/html"), MSG_SAVE_OK);
 
     if (request->hasParam("token")) {
-      Connect.SetToken(request->getParam("token")->value());
+      String token = request->getParam("token")->value();
+      token.trim();
+
+      /* Camera Service token: exactly 20 characters A-Z, a-z, 0-9 */
+      bool valid = (token.length() == CAMERA_SERVICE_TOKEN_LEN);
+      for (size_t i = 0; (i < token.length()) && valid; i++) {
+        valid = isalnum(token.charAt(i));
+      }
+
+      if (valid) {
+        Connect.SetToken(token);
+        request->send(200, F("text/html"), F("Save OK. Camera registration starts now, it must be done within 15 minutes after adding the camera in Prusa Connect"));
+      } else {
+        request->send(200, F("text/html"), F("ERROR! Token must have exactly 20 characters A-Z, a-z, 0-9"));
+      }
+    } else {
+      request->send(200, F("text/html"), MSG_SAVE_NOTOK);
     }
+  });
+
+  /* route for PrusaLink cfg /set_prusalink?enable=true&host=192.168.1.10&user=maker&password=xxx */
+  server.on("/set_prusalink", HTTP_GET | HTTP_POST, [](AsyncWebServerRequest* request) {
+    SystemLog.AddEvent(LogLevel_Verbose, F("WEB server: /set_prusalink"));
+    if (Server_CheckWriteRequest(request) == false)
+      return;
+
+    String msg = MSG_SAVE_OK;
+    if (request->hasArg("host")) {
+      String host = request->arg("host");
+      if (host.length() < EEPROM_ADDR_PRUSALINK_HOST_LENGTH) {
+        SystemPrusaLink.SetHost(host);
+      } else {
+        msg = "ERROR! Maximum host length is " + String(EEPROM_ADDR_PRUSALINK_HOST_LENGTH - 1);
+      }
+    }
+
+    if (request->hasArg("user")) {
+      String user = request->arg("user");
+      if (user.length() < EEPROM_ADDR_PRUSALINK_USER_LENGTH) {
+        SystemPrusaLink.SetUser(user);
+      } else {
+        msg = "ERROR! Maximum user name length is " + String(EEPROM_ADDR_PRUSALINK_USER_LENGTH - 1);
+      }
+    }
+
+    /* empty password parameter keeps the saved password, the WEB page never receives the password */
+    if (request->hasArg("password") && (request->arg("password").length() > 0)) {
+      String password = request->arg("password");
+      if (password.length() < EEPROM_ADDR_PRUSALINK_PASSWORD_LENGTH) {
+        SystemPrusaLink.SetPassword(password);
+      } else {
+        msg = "ERROR! Maximum password length is " + String(EEPROM_ADDR_PRUSALINK_PASSWORD_LENGTH - 1);
+      }
+    }
+
+    if (request->hasArg("enable")) {
+      SystemPrusaLink.SetEnable(Server_TransfeStringToBool(request->arg("enable")));
+    }
+
+    request->send(200, F("text/html"), msg.c_str());
   });
 
   /* route for set prusa connect hostname /set_hostname?hostname=*/
   server.on("/set_hostname", HTTP_GET, [](AsyncWebServerRequest* request) {
     SystemLog.AddEvent(LogLevel_Verbose, F("WEB server: /set_hostname"));
-    if (Server_CheckBasicAuth(request) == false)
+    if (Server_CheckWriteRequest(request) == false)
       return;
     request->send(200, F("text/html"), MSG_SAVE_OK);
 
@@ -838,21 +745,29 @@ void Server_InitWebServer_Sets() {
   });
 
   /* route for set WI-FI credentials */
-  server.on("/wifi_cfg", HTTP_GET, [](AsyncWebServerRequest* request) {
-    SystemLog.AddEvent(LogLevel_Verbose, F("WEB server: set WI-FI credentials"));
-    if (Server_CheckBasicAuth(request) == false)
+  server.on("/wifi_cfg", HTTP_GET | HTTP_POST, [](AsyncWebServerRequest* request) {
+    SystemLog.AddEvent(LogLevel_Verbose, F("WEB server: set Wi-Fi credentials"));
+    if (Server_CheckWriteRequest(request) == false)
       return;
 
     String TmpPassword = "";
     String TmpSsid = "";
     /* get SSID */
-    if (request->hasParam("wifi_ssid")) {
-      TmpSsid = request->getParam("wifi_ssid")->value();
+    if (request->hasArg("wifi_ssid")) {
+      TmpSsid = request->arg("wifi_ssid");
     }
 
     /* get password */
-    if (request->hasParam("wifi_pass")) {
-      TmpPassword = request->getParam("wifi_pass")->value();
+    if (request->hasArg("wifi_pass")) {
+      TmpPassword = request->arg("wifi_pass");
+    }
+
+    /* Wi-Fi Enterprise is on: the Wi-Fi password is not used, an empty password changes only the SSID */
+    if ((true == SystemWifiMngt.GetStaEapEnable()) && (TmpPassword.length() == 0) && (TmpSsid.length() > 0) && (TmpSsid.length() < EEPROM_ADDR_WIFI_SSID_LENGTH)) {
+      request->send(200, F("text/html"), MSG_SAVE_OK_WIFI);
+      SystemWifiMngt.SetStaSsid(TmpSsid);
+      SystemWifiMngt.WiFiStaConnect();
+      return;
     }
 
     /* check min and max length WI-FI ssid and password */
@@ -865,10 +780,38 @@ void Server_InitWebServer_Sets() {
       /* send OK response */
       request->send(200, F("text/html"), MSG_SAVE_OK_WIFI);
 
-      /* save ssid and password */
+      /* save ssid and password. A Wi-Fi password switches Wi-Fi Enterprise off, SetStaEapEnable() connects again */
       SystemWifiMngt.SetStaCredentials(TmpSsid, TmpPassword);
-      SystemWifiMngt.WiFiStaConnect();
+      if (true == SystemWifiMngt.GetStaEapEnable()) {
+        SystemWifiMngt.SetStaEapEnable(false);
+      } else {
+        SystemWifiMngt.WiFiStaConnect();
+      }
 
+    } else {
+      request->send(200, F("text/html"), MSG_SAVE_NOTOK);
+    }
+  });
+
+  /* route for save and connect a Wi-Fi Enterprise (PEAP) network. POST: the password is not in the URL */
+  server.on("/wifi_wpa2_eap", HTTP_GET | HTTP_POST, [](AsyncWebServerRequest* request) {
+    SystemLog.AddEvent(LogLevel_Verbose, F("WEB server: set Wi-Fi Enterprise credentials"));
+    if (Server_CheckWriteRequest(request) == false)
+      return;
+
+    String TmpSsid = request->hasArg("ssid") ? request->arg("ssid") : String("");
+    String TmpIdentity = request->hasArg("identity") ? request->arg("identity") : String("");
+    String TmpUser = request->hasArg("user") ? request->arg("user") : String("");
+    String TmpPassword = request->hasArg("pass") ? request->arg("pass") : String("");
+
+    /* an empty password keeps the saved one, but the first save needs a password */
+    bool PasswordOk = (TmpPassword.length() < EEPROM_ADDR_WIFI_EAP_PASSWORD_LENGTH) &&
+                      ((TmpPassword.length() > 0) || (true == SystemWifiMngt.GetStaEapPasswordSaved()));
+    if ((TmpSsid.length() > 0) && (TmpSsid.length() < EEPROM_ADDR_WIFI_SSID_LENGTH) &&
+        (TmpIdentity.length() < EEPROM_ADDR_WIFI_EAP_IDENTITY_LENGTH) && (TmpUser.length() > 0) &&
+        (TmpUser.length() < EEPROM_ADDR_WIFI_EAP_USERNAME_LENGTH) && (true == PasswordOk)) {
+      request->send(200, F("text/html"), MSG_SAVE_OK_WIFI);
+      SystemWifiMngt.SetStaEapNetwork(TmpSsid, TmpIdentity, TmpUser, TmpPassword);
     } else {
       request->send(200, F("text/html"), MSG_SAVE_NOTOK);
     }
@@ -876,8 +819,8 @@ void Server_InitWebServer_Sets() {
 
   /* route for set WI-FI static IP address */
   server.on("/wifi_net_cfg", HTTP_GET, [](AsyncWebServerRequest* request) {
-    SystemLog.AddEvent(LogLevel_Verbose, F("WEB server: set WI-FI static IP address"));
-    if (Server_CheckBasicAuth(request) == false)
+    SystemLog.AddEvent(LogLevel_Verbose, F("WEB server: set Wi-Fi static IP address"));
+    if (Server_CheckWriteRequest(request) == false)
       return;
 
     String tmpIp = "";
@@ -921,89 +864,67 @@ void Server_InitWebServer_Sets() {
 
 
   /* route for set basic auth */
-  server.on("/basicauth_cfg", HTTP_GET, [](AsyncWebServerRequest* request) {
+  server.on("/basicauth_cfg", HTTP_GET | HTTP_POST, [](AsyncWebServerRequest* request) {
     SystemLog.AddEvent(LogLevel_Verbose, F("WEB server: set basic auth user name and password"));
-    bool ret = false;
-    String ret_msg = "";
 
-    if (Server_CheckBasicAuth(request) == false)
+    if (Server_CheckWriteRequest(request) == false)
       return;
 
-    /* get username */
-    if (request->hasParam("auth_username")) {
-      WebBasicAuth.UserName = request->getParam("auth_username")->value();
+    /* check every value before anything is changed: a rejected value must not reach the running login.
+       An empty password means "unchanged", like the PrusaLink password */
+    String username = request->arg("auth_username");
+    String password = request->arg("auth_password");
+    bool setUsername = request->hasArg("auth_username");
+    bool setPassword = request->hasArg("auth_password") && (password.length() > 0);
+    bool setEnable = request->hasArg("basicauth_enable");
+    String ret_msg = "";
 
-      /* check min and max length  */
-      if ((WebBasicAuth.UserName.length() > 0) && (WebBasicAuth.UserName.length() < EEPROM_ADDR_BASIC_AUTH_USERNAME_LENGTH)) {
-        SystemConfig.SaveBasicAuthUsername(WebBasicAuth.UserName);
-        ret = true;
-      } else {
-        ret = false;
-        ret_msg = "Maximum username length: " + String(EEPROM_ADDR_BASIC_AUTH_USERNAME_LENGTH);
-      }
+    if ((true == setUsername) && ((username.length() == 0) || (username.length() >= EEPROM_ADDR_BASIC_AUTH_USERNAME_LENGTH))) {
+      ret_msg = "User name: 1 to " + String(EEPROM_ADDR_BASIC_AUTH_USERNAME_LENGTH - 1) + " characters";
+    } else if ((true == setPassword) && (password.length() >= EEPROM_ADDR_BASIC_AUTH_PASSWORD_LENGTH)) {
+      ret_msg = "Maximum password length: " + String(EEPROM_ADDR_BASIC_AUTH_PASSWORD_LENGTH - 1);
+    } else if ((false == setUsername) && (false == setPassword) && (false == setEnable)) {
+      ret_msg = "Nothing to save";
     }
 
-    /* get password */
-    if (request->hasParam("auth_password")) {
-      WebBasicAuth.Password = request->getParam("auth_password")->value();
-
-      /* check min and max length  */
-      if ((WebBasicAuth.Password.length() > 0) && (WebBasicAuth.Password.length() < EEPROM_ADDR_BASIC_AUTH_PASSWORD_LENGTH)) {
-        SystemConfig.SaveBasicAuthPassword(WebBasicAuth.Password);
-        ret = true;
-      } else {
-        ret = false;
-        ret_msg = "Maximum password length: " + String(EEPROM_ADDR_BASIC_AUTH_PASSWORD_LENGTH);
-      }
-    }
-
-    /* get enable / disable we bauth */
-    if (request->hasParam("basicauth_enable")) {
-      WebBasicAuth.EnableAuth = Server_TransfeStringToBool(request->getParam("basicauth_enable")->value());
-      SystemConfig.SaveBasicAuthFlag(WebBasicAuth.EnableAuth);
-      ret = true;
-    }
-
-    /* send OK response */
-    if (true == ret) {
-      request->send(200, F("text/html"), MSG_SAVE_OK);
-
-    } else {
+    if (ret_msg.length() > 0) {
       String msg = MSG_SAVE_NOTOK;
       msg += " " + ret_msg;
       request->send(200, F("text/html"), msg.c_str());
-    }
-  });
-
-  /* route for set firmware size */
-  server.on("/set_firmware_size", HTTP_GET, [](AsyncWebServerRequest* request) {
-    SystemLog.AddEvent(LogLevel_Info, F("WEB server: /set_firmware_size"));
-    if (Server_CheckBasicAuth(request) == false)
       return;
-    request->send(200, F("text/html"), MSG_SAVE_OK);
-
-    /* check cfg for flash */
-    if (request->hasParam("size")) {
-      SystemLog.AddEvent(LogLevel_Info, String(request->getParam("size")->value().toInt()));
-      FirmwareUpdate.FirmwareSize = request->getParam("size")->value().toInt();
     }
+
+    if (true == setUsername) {
+      WebBasicAuth.UserName = username;
+      SystemConfig.SaveBasicAuthUsername(username);
+    }
+    if (true == setPassword) {
+      WebBasicAuth.Password = password;
+      SystemConfig.SaveBasicAuthPassword(password);
+    }
+    if (true == setEnable) {
+      WebBasicAuth.EnableAuth = Server_TransfeStringToBool(request->arg("basicauth_enable"));
+      SystemConfig.SaveBasicAuthFlag(WebBasicAuth.EnableAuth);
+    }
+
+    request->send(200, F("text/html"), MSG_SAVE_OK);
   });
 
-  /* route for set firmware size */
+  /* route for set mDNS record */
   server.on("/set_mdns", HTTP_GET, [](AsyncWebServerRequest* request) {
     SystemLog.AddEvent(LogLevel_Verbose, F("WEB server: /set_mdns"));
-    if (Server_CheckBasicAuth(request) == false)
+    if (Server_CheckWriteRequest(request) == false)
       return;
 
     /* check cfg for mdns */
     if (request->hasParam("mdns")) {
       String tmp = request->getParam("mdns")->value();
-      if (tmp.length() < EEPROM_ADDR_MDNS_RECORD_LENGTH) {
+      if (true == SystemWifiMngt.SetMdns(tmp)) {
         request->send(200, F("text/html"), MSG_SAVE_OK_REBOOT);
-        SystemWifiMngt.SetMdns(tmp);
+        Connect.UpdateDeviceInformation();
 
       } else {
-        String msg = "Error save mDNS. Maximum length: " + String(EEPROM_ADDR_MDNS_RECORD_LENGTH);
+        String msg = "ERROR! Camera name: 1 to " + String(EEPROM_ADDR_MDNS_RECORD_LENGTH - 1) + " letters, digits and '-', not '-' at the start or the end";
         request->send(200, F("text/html"), msg.c_str());
       }
     }
@@ -1011,91 +932,124 @@ void Server_InitWebServer_Sets() {
 }
 
 /**
-   @brief Init WEB FW update
+   @brief Init WEB firmware upload. The user uploads an application file (.bin) from the computer:
+          this firmware or the original Prusa firmware. There is no download from the internet
    @param none
    @return none
 */
 void Server_InitWebServer_Update() {
-  System_UpdateInit();
-
-  /* route for firmware update with file */
   server.on(
-    "/upload", HTTP_POST, [](AsyncWebServerRequest* request) {
-      String string_json = "";
-      JsonDocument doc_json;
+    "/upload_firmware", HTTP_POST, [](AsyncWebServerRequest* request) {
+      if (Server_CheckWriteRequest(request) == false)
+        return;
 
-      String responseMessage = (Update.hasError()) ? SYSTEM_MSG_UPDATE_FAIL : SYSTEM_MSG_UPDATE_DONE;
-      doc_json["message"] = responseMessage;
-      FirmwareUpdate.UpdatingStatus = responseMessage;
-
-      /* get error string */
-      if (Update.hasError()) {
-        String errorMessage = Update.errorString();
-        doc_json["errorMessage"] = errorMessage;
-        FirmwareUpdate.UpdatingStatus += errorMessage;
-        FirmwareUpdate.Processing = false;
+      if ((FirmwareUpload.Error.length() == 0) && (true == Update.isFinished())) {
+        request->send(200, F("text/plain"), F("Firmware installed. The camera restarts now, the page reloads in 20 s"));
+        FirmwareUpload.RestartPending = true;
+      } else {
+        String msg = (FirmwareUpload.Error.length() > 0) ? FirmwareUpload.Error : String(F("The upload is not complete"));
+        request->send(400, F("text/plain"), "Firmware NOT installed: " + msg);
       }
-
-      /* make and send json msg */
-      serializeJson(doc_json, string_json);
-      AsyncWebServerResponse* response = request->beginResponse(200, "application/json", string_json);
-      response->addHeader("Connection", "close");
-      request->send(response);
     },
     [](AsyncWebServerRequest* request, String filename, size_t index, uint8_t* data, size_t len, bool final) {
-      if (!index) {
-        FirmwareUpdate.Processing = true;
-        SystemLog.AddEvent(LogLevel_Info, F("Start FW update from file: "), filename);
-        FirmwareUpdate.UpdatingStatus = String(SYSTEM_MSG_UPDATE_PROCESS);
-        if (!Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH)) {
-          Update.printError(Serial);
+      if (0 == index) {
+        /* an earlier upload was interrupted by the browser */
+        if (true == Update.isRunning()) {
+          Update.abort();
+        }
+        FirmwareUpload.Error = "";
+
+        /* no answer from here, the request handler answers after the upload */
+        if ((true == WebBasicAuth.EnableAuth) && (!request->authenticate(WebBasicAuth.UserName.c_str(), WebBasicAuth.Password.c_str()))) {
+          FirmwareUpload.Error = F("Unauthorized");
+        } else if (request->header(WEB_WRITE_HEADER_NAME) != WEB_WRITE_HEADER_VALUE) {
+          /* only the camera page may install firmware, not a form of another site (CSRF) */
+          FirmwareUpload.Error = F("Forbidden: firmware is accepted only from the camera page");
+        } else if (false == Server_HostAllowed(request)) {
+          /* the flash is written here, before the request handler checks the host name (DNS rebinding) */
+          FirmwareUpload.Error = F("Forbidden: open the camera with its IP address or its mDNS name");
+        } else {
+          FirmwareUpload.Error = Server_CheckFirmwareImage(data, len);
+        }
+
+        if (FirmwareUpload.Error.length() == 0) {
+          SystemLog.AddEvent(LogLevel_Warning, F("Firmware upload started: "), filename);
+          FirmwareUpload.Active = true;
+          FirmwareUpload.LastData = millis();
+          if (!Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH)) {
+            FirmwareUpload.Error = "Update start failed: " + String(Update.errorString());
+          }
+        }
+
+        if (FirmwareUpload.Error.length() > 0) {
+          SystemLog.AddEvent(LogLevel_Error, F("Firmware upload rejected: "), FirmwareUpload.Error);
+          FirmwareUpload.Active = false;
         }
       }
 
+      /* after an error, the rest of the file is ignored */
+      if (FirmwareUpload.Error.length() > 0) {
+        return;
+      }
+
+      FirmwareUpload.LastData = millis();
       if (Update.write(data, len) != len) {
-        Update.printError(Serial);
+        FirmwareUpload.Error = "Flash write failed: " + String(Update.errorString());
+        SystemLog.AddEvent(LogLevel_Error, FirmwareUpload.Error);
+        Update.abort();
+        FirmwareUpload.Active = false;
+        return;
       }
 
       if (final) {
-        FirmwareUpdate.Processing = false;
-        if (Update.end(true)) {
-          FirmwareUpdate.UpdatingStatus = String(SYSTEM_MSG_UPDATE_DONE);
-          SystemLog.AddEvent(LogLevel_Info, F("Update FW from file done. Reboot MCU"));
+        /* checks the image hash and sets the new firmware for the next start */
+        if (true == Update.end(true)) {
+          SystemLog.AddEvent(LogLevel_Warning, "Firmware upload done: " + String(index + len) + " B");
         } else {
-          Update.printError(Serial);
-          SystemLog.AddEvent(LogLevel_Error, String(SYSTEM_MSG_UPDATE_FAIL));
+          FirmwareUpload.Error = "Firmware check failed: " + String(Update.errorString());
+          SystemLog.AddEvent(LogLevel_Error, FirmwareUpload.Error);
         }
+        FirmwareUpload.Active = false;
       }
     });
+}
 
-  /* route for start web OTA update from server */
-  server.on("/web_ota_update", HTTP_GET, [](AsyncWebServerRequest* request) {
-    SystemLog.AddEvent(LogLevel_Info, F("WEB server: /web_ota_update"));
-    if (Server_CheckBasicAuth(request) == false)
-      return;
-    request->send(200, F("text/html"), MSG_UPDATE_START);
-    FirmwareUpdate.Processing = true;
+/**
+   @brief Check the beginning of an uploaded firmware file, before anything is written to the flash.
+          Accepts only an application image for this chip. The bootloader, the partition table and the merged .bin
+          (bootloader + partitions + application) are rejected, they would make the MCU unbootable
+   @param const uint8_t* - first part of the file
+   @param size_t - length
+   @return String - error message. Empty = OK
+*/
+String Server_CheckFirmwareImage(const uint8_t* i_data, size_t i_len) {
+  const size_t desc_offset = sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t);
+  if (i_len < (desc_offset + offsetof(esp_app_desc_t, time))) {
+    return F("The first part of the upload is too small. Try again");
+  }
 
-    /* check flag */
-    if (request->hasParam("update")) {
-      bool ret = Server_TransfeStringToBool(request->getParam("update")->value());
-      if (ret == true) {
-        FirmwareUpdate.StartOtaUpdate = true;
-      } else {
-        FirmwareUpdate.StartOtaUpdate = false;
-      }
-    }
-  });
+  esp_image_header_t header;
+  esp_app_desc_t desc;
+  memcpy(&header, i_data, sizeof(header));
+  memcpy(&desc, i_data + desc_offset, offsetof(esp_app_desc_t, time));
 
-  /* get OTA FW version on the server */
-  server.on("/check_web_ota_update", HTTP_GET, [](AsyncWebServerRequest* request) {
-    SystemLog.AddEvent(LogLevel_Verbose, F("WEB server: /check_web_ota_update"));
-    if (Server_CheckBasicAuth(request) == false)
-      return;
+  if (ESP_IMAGE_HEADER_MAGIC != header.magic) {
+    return F("This is not a firmware file");
+  }
+  if (CONFIG_IDF_FIRMWARE_CHIP_ID != header.chip_id) {
+    return F("This firmware is for another chip, for example ESP32 instead of ESP32-S3");
+  }
+  if (ESP_APP_DESC_MAGIC_WORD != desc.magic_word) {
+    return F("This is not an application file. Use ESP32_PrusaConnectCam.ino.bin, not the merged.bin or the bootloader.bin");
+  }
 
-    System_CheckNewVersion();
-    request->send(200, F("text/html"), FirmwareUpdate.CheckNewVersionFwStatus.c_str());
-  });
+  char project[sizeof(desc.project_name) + 1] = { '\0' };
+  char version[sizeof(desc.version) + 1] = { '\0' };
+  memcpy(project, desc.project_name, sizeof(desc.project_name));
+  memcpy(version, desc.version, sizeof(desc.version));
+  SystemLog.AddEvent(LogLevel_Warning, "Firmware upload: project " + String(project) + ", version " + String(version));
+
+  return "";
 }
 
 /**
@@ -1108,26 +1062,6 @@ void Server_InitWebServer_Stream() {
 }
 
 /**
-   @brief Pause WEB server
-   @param none
-   @return none
-*/
-void Server_pause() {
-  server.end();
-  SystemLog.AddEvent(LogLevel_Verbose, F("WEB server: pause"));
-}
-
-/**
-   @brief Resume WEB server
-   @param none
-   @return none
-*/
-void Server_resume() {
-  server.begin();
-  SystemLog.AddEvent(LogLevel_Verbose, F("WEB server: resume"));
-}
-
-/**
  * @brief Handle cache request
  * 
  * @param AsyncWebServerRequest* - http request
@@ -1135,20 +1069,16 @@ void Server_resume() {
  * @param const char* - data
  */
 void Server_handleCacheRequest(AsyncWebServerRequest* request, const char* contentType, const char* data) {
-  /*
-  AsyncWebServerResponse* response = request->beginResponse(200, contentType, data);
-  response->addHeader("Cache-Control", "public, max-age=" + String(WEB_CACHE_INTERVAL));
-  request->send(response); 
-  */
+  /* the data is in the flash memory, the response reads it directly. The length is computed once, not for every chunk */
+  AsyncWebServerResponse* response = request->beginResponse(200, contentType, (const uint8_t*)data, strlen(data));
 
-  AsyncWebServerResponse* response = request->beginChunkedResponse(contentType, [data](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
-    const char* dataStart = data + index; // current position in data
-    size_t dataLeft = strlen(data) - index; // how many bytes are left to send
-    size_t chunkSize = dataLeft < maxLen ? dataLeft : maxLen; // how many bytes we can send now
-    memcpy(buffer, dataStart, chunkSize); // copy chunk of data to buffer
-    return chunkSize; // return chunk size
-  });
-  response->addHeader("Cache-Control", "public, max-age=" + String(WEB_CACHE_INTERVAL));
+  /* HTML pages must not be cached, otherwise the browser shows the old pages after a firmware update.
+     Other files are cached, styles.css is loaded with the firmware version in the URL */
+  if (strcmp(contentType, "text/html") == 0) {
+    response->addHeader("Cache-Control", "no-cache");
+  } else {
+    response->addHeader("Cache-Control", "public, max-age=" + String(WEB_CACHE_INTERVAL));
+  }
   request->send(response);
 }
 
@@ -1182,11 +1112,25 @@ String Server_GetJsonData() {
   JsonDocument doc_json;
   Server_GetModuleUptime(uptime);
 
-  doc_json["token"] = Connect.GetToken();
+  /* only the end of the token: anybody in the network could read it here and upload images to the camera in Prusa Connect */
+  String token = Connect.GetToken();
+  String token_masked = "";
+  for (int i = 0; i < ((int)token.length() - 4); i++) {
+    token_masked += '*';
+  }
+  token_masked += token.substring((token.length() > 4) ? token.length() - 4 : 0);
+  doc_json["token"] = token_masked;
   doc_json["fingerprint"] = Connect.GetFingerprint();
   doc_json["refreshInterval"] = String(Connect.GetRefreshInterval());
   doc_json["photoquality"] = String(73 - SystemCamera.GetPhotoQuality());
   doc_json["framesize"] = String(SystemCamera.GetFrameSize());
+  doc_json["last_photo_size"] = SystemCamera.GetLastPhotoSize();
+  doc_json["last_photo_framesize"] = SystemCamera.GetLastPhotoFrameSize();
+  doc_json["last_photo_quality"] = SystemCamera.GetLastPhotoQuality();
+  doc_json["photo_max_size"] = CAMERA_SERVICE_SNAPSHOT_MAX_SIZE;
+  doc_json["framesize_supported"] = SystemCamera.GetSupportedFrameSizes();
+  doc_json["camera_detected"] = SystemCamera.GetDetectedSensorName();
+  doc_json["camera_autofocus"] = SystemCamera.GetAutofocusStatus();
   doc_json["brightness"] = String(SystemCamera.GetBrightness());
   doc_json["contrast"] = String(SystemCamera.GetContrast());
   doc_json["saturation"] = String(SystemCamera.GetSaturation());
@@ -1205,9 +1149,6 @@ String Server_GetJsonData() {
   doc_json["aec_value"] = SystemCamera.GetAecValue();
   doc_json["gain_ctrl"] = Server_TranslateBoolToString(SystemCamera.GetGainCtrl());
   doc_json["agc_gain"] = SystemCamera.GetAgcGaint();
-  doc_json["led"] = Server_TranslateBoolToString(SystemCamera.GetFlashStatus());
-  doc_json["flash"] = Server_TranslateBoolToString(SystemCamera.GetCameraFlashEnable());
-  doc_json["flash_time"] = SystemCamera.GetCameraFlashTime();
   doc_json["ssid"] = SystemWifiMngt.GetStaSsid();
   doc_json["bssid"] = SystemWifiMngt.GetStaBssid();
   doc_json["rssi"] = String(WiFi.RSSI());
@@ -1218,11 +1159,15 @@ String Server_GetJsonData() {
   doc_json["mdns"] = SystemWifiMngt.GetMdns();
   doc_json["service_ap_ssid"] = SystemWifiMngt.GetServiceApSsid();
   doc_json["serviceap"] = Server_TranslateBoolToString(SystemWifiMngt.GetEnableServiceAp());
+  doc_json["wpa2_eap"] = Server_TranslateBoolToString(SystemWifiMngt.GetStaEapEnable());
+  doc_json["wpa2_eap_identity"] = SystemWifiMngt.GetStaEapIdentity();
+  doc_json["wpa2_eap_user"] = SystemWifiMngt.GetStaEapUsername();
   doc_json["auth"] = Server_TranslateBoolToString(WebBasicAuth.EnableAuth);
   doc_json["auth_username"] = WebBasicAuth.UserName;
   doc_json["last_upload_status"] = Connect.GetBackendReceivedStatus();
   doc_json["wifi_network_status"] = SystemWifiMngt.GetStaStatus();
   doc_json["log_level"] = String(SystemLog.GetLogLevel());
+  doc_json["status_led"] = String(system_led.getMode());
   doc_json["uptime"] = uptime;
   doc_json["user_name"] = WebBasicAuth.UserName;
   doc_json["hostname"] = Connect.GetPrusaConnectHostname();
@@ -1237,15 +1182,27 @@ String Server_GetJsonData() {
   doc_json["sd_total"] = SystemLog.GetCardSizeMB();
   doc_json["sd_free_p"] = SystemLog.GetFreeSpacePercent();
   doc_json["sd_used_p"] = SystemLog.GetUsedSpacePercent();
-  doc_json["mcu_temp"] = String(McuTemperature.TemperatureCelsius) + " *C";
+  doc_json["mcu_temp"] = String(McuTemperature.TemperatureCelsius) + " *C" + ((true == McuTemperature.ThermalThrottling) ? " - TOO HOT, stream disabled, uploads slowed down" : "");
+  doc_json["thermal_throttling"] = Server_TranslateBoolToString(McuTemperature.ThermalThrottling);
+  doc_json["thermal_slow"] = Server_TranslateBoolToString(McuTemperature.StreamSlow);
+  doc_json["upload_interval"] = String(System_GetUploadInterval());
+  doc_json["health_status"] = (Connect.GetHealthStatus().length() > 0) ? Connect.GetHealthStatus() : String(F("OK"));
+  doc_json["upload_ok"] = Connect.GetUploadOkCount();
+  doc_json["upload_failed"] = Connect.GetUploadFailedCount();
+  doc_json["unplanned_restarts"] = SystemHealth.UnplannedRestarts;
+  doc_json["last_restart"] = SystemHealth.LastRestartReason;
+  doc_json["mcu_temp_max"] = String(McuTemperature.TemperatureMax) + " *C";
+  doc_json["mem_internal"] = String(heap_caps_get_free_size(MALLOC_CAP_INTERNAL) / 1024) + " KB free, largest block " + String(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) / 1024) + " KB";
+  doc_json["mem_psram"] = String(heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024) + " KB free, largest block " + String(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) / 1024) + " KB";
+  doc_json["backoff_interval"] = String(Connect.GetBackoffInterval());
+  doc_json["prusalink_enable"] = Server_TranslateBoolToString(SystemPrusaLink.GetEnable());
+  doc_json["prusalink_host"] = SystemPrusaLink.GetHost();
+  doc_json["prusalink_user"] = SystemPrusaLink.GetUser();
+  doc_json["prusalink_status"] = SystemPrusaLink.GetStatus();
+  doc_json["printer_state"] = SystemPrusaLink.GetPrinterState();
+  doc_json["job_progress"] = String(SystemPrusaLink.GetJobProgress(), 0);
   doc_json["sw_build"] = SW_BUILD;
   doc_json["sw_ver"] = SW_VERSION;
-  doc_json["sw_new_ver"] = FirmwareUpdate.NewVersionFw;
-  doc_json["extsens_stat"] = ExternalTemperatureSensor.GetSensorStatus();
-  doc_json["extsen_en"] = ExternalTemperatureSensor.GetUserEnableSensor();
-  doc_json["ext_temp"] = ExternalTemperatureSensor.GetTemperatureString();
-  doc_json["ext_hum"] = ExternalTemperatureSensor.GetHumidityString();
-  doc_json["exttemp_unit"] = ExternalTemperatureSensor.GetTemperatureUnit();
 
   serializeJson(doc_json, string_json);
   SystemLog.AddEvent(LogLevel_Verbose, string_json);
@@ -1258,9 +1215,87 @@ String Server_GetJsonData() {
    @return bool - status
 */
 bool Server_CheckBasicAuth(AsyncWebServerRequest* request) {
+  if (false == Server_CheckHost(request)) {
+    return false;
+  }
+
   if ((!request->authenticate(WebBasicAuth.UserName.c_str(), WebBasicAuth.Password.c_str())) && (true == WebBasicAuth.EnableAuth)) {
     SystemLog.AddEvent(LogLevel_Verbose, F("Unauthorized! Sending longin request"));
     request->requestAuthentication();
+    return false;
+  }
+
+  return true;
+}
+
+/**
+   @brief Check the host name of the request against DNS rebinding: a site of an attacker whose name points to the
+          camera IP could otherwise read the camera pages. Accepted: an IP address or the camera name, alone or with
+          one of WEB_HOST_SUFFIXES. Camera names: the mDNS and DHCP names used since the start, and a new name saved
+          on the WEB page (used after the next start), so the page keeps working before and after the restart. Without a Host header (old clients) the
+          request is accepted. Does not answer the request
+   @param AsyncWebServerRequest - request
+   @return bool - true when the host name is accepted
+*/
+bool Server_HostAllowed(AsyncWebServerRequest* request) {
+  String host = request->host();
+  int port = host.indexOf(':');
+  if (port >= 0) {
+    host = host.substring(0, port);
+  }
+  host.toLowerCase();
+
+  IPAddress ip;
+  if ((host.length() == 0) || (true == ip.fromString(host))) {
+    return true;
+  }
+
+  String names[] = { SystemWifiMngt.GetStartMdns(), SystemWifiMngt.GetDhcpHostname(), SystemWifiMngt.GetMdns() };
+  static const char* suffixes[] = WEB_HOST_SUFFIXES;
+  for (String& name : names) {
+    name.toLowerCase();
+    if (host == name) {
+      return true;
+    }
+    for (const char* suffix : suffixes) {
+      if (host == (name + "." + suffix)) {
+        return true;
+      }
+    }
+  }
+
+  SystemLog.AddEvent(LogLevel_Warning, F("WEB server: refused host name "), host);
+  return false;
+}
+
+/**
+   @brief Check the host name of the request, see Server_HostAllowed
+   @param AsyncWebServerRequest - request
+   @return bool - true when the host name is accepted, false after a 403 answer
+*/
+bool Server_CheckHost(AsyncWebServerRequest* request) {
+  if (false == Server_HostAllowed(request)) {
+    request->send(403, F("text/plain"), F("Forbidden: open the camera with its IP address or its mDNS name"));
+    return false;
+  }
+
+  return true;
+}
+
+/**
+   @brief Check a request that changes the camera: login, host name, and the WEB_WRITE_HEADER_NAME header that only the
+          camera page sends. A page of another site cannot add the header, so it cannot change the camera (CSRF)
+   @param AsyncWebServerRequest - request
+   @return bool - true when the request may change the camera, false after an answer
+*/
+bool Server_CheckWriteRequest(AsyncWebServerRequest* request) {
+  if (false == Server_CheckBasicAuth(request)) {
+    return false;
+  }
+
+  if ((false == request->hasHeader(WEB_WRITE_HEADER_NAME)) || (request->header(WEB_WRITE_HEADER_NAME) != WEB_WRITE_HEADER_VALUE)) {
+    SystemLog.AddEvent(LogLevel_Warning, F("WEB server: refused request without the camera page header: "), request->url());
+    request->send(403, F("text/plain"), F("Forbidden: changes are accepted only from the camera page"));
     return false;
   }
 
@@ -1273,12 +1308,26 @@ bool Server_CheckBasicAuth(AsyncWebServerRequest* request) {
    @return void
 */
 void Server_streamJpg(AsyncWebServerRequest* request) {
+  SystemLog.AddEvent(LogLevel_Verbose, F("WEB server: /stream.mjpg"));
+  if (Server_CheckBasicAuth(request) == false)
+    return;
+
+  if (true == McuTemperature.ThermalThrottling) {
+    request->send(503, "text/plain", "MCU temperature is too high, the stream is disabled until the camera cools down");
+    return;
+  }
+
+  /* every client gets the latest frame from the stream buffers, the count is limited by the WiFi bandwidth */
+  if (SystemCamera.GetStreamClients() >= CAMERA_STREAM_MAX_CLIENTS) {
+    request->send(503, "text/plain", "The stream is already open in " + String(CAMERA_STREAM_MAX_CLIENTS) + " windows. Close one of them first");
+    return;
+  }
+
   AsyncJpegStreamResponse* response = new AsyncJpegStreamResponse(&SystemCamera, &SystemLog);
   if (!response) {
     request->send(501);
     return;
   }
-  response->addHeader("Access-Control-Allow-Origin", "*");
   request->send(response);
 }
 

@@ -30,7 +30,7 @@ void System_Init() {
   SystemLog.AddEvent(LogLevel_Warning, "CPU0 reset reason: " + reason_core0);
   SystemLog.AddEvent(LogLevel_Warning, "CPU1 reset reason: " + reason_core1);
 
-  SystemLog.AddEvent(LogLevel_Info, "MCU Temperature: " + String(temperatureRead()) + " *C");
+  SystemLog.AddEvent(LogLevel_Info, "MCU Temperature: " + String(System_ReadMcuTemperature()) + " *C");
   SystemLog.AddEvent(LogLevel_Info, "Internal Total heap: " + String(ESP.getHeapSize()) + " B, Internal Free Heap: " + String(ESP.getFreeHeap()));
   SystemLog.AddEvent(LogLevel_Info, "PSRAM Total heap: " + String(ESP.getPsramSize()) + " B, PSRAM Free Heap: " + String(ESP.getFreePsram()));
   SystemLog.AddEvent(LogLevel_Info, "Chip model: " + String(ESP.getChipModel()) + ", ChipRevision: " + String(ESP.getChipRevision()) + ", Cpu Freq: " + String(ESP.getCpuFreqMHz()));
@@ -46,7 +46,17 @@ void System_Init() {
    @return none
 */
 void System_LoadCfg() {
+  /* restart statistics */
+  SystemRestartReason_enum automatic = System_ConsumeRestartReason();
+  esp_reset_reason_t reason = esp_reset_reason();
+  SystemHealth.LastRestartReason = System_GetRestartReasonText(reason, automatic);
+  SystemHealth.UnplannedRestarts = SystemConfig.LoadUnplannedRestarts();
 
+  if (true == System_IsUnplannedRestart(reason, automatic)) {
+    SystemHealth.UnplannedRestarts++;
+    SystemConfig.SaveUnplannedRestarts(SystemHealth.UnplannedRestarts);
+  }
+  SystemLog.AddEvent(LogLevel_Warning, "Last restart: " + SystemHealth.LastRestartReason + ". Unplanned restarts: " + String(SystemHealth.UnplannedRestarts));
 }
 
 /**
@@ -79,257 +89,139 @@ bool System_CheckIfPsramIsUsed() {
 }
 
 /**
-   @brief Function for init update functions from file
-   @param none
-   @return none
-*/
-void System_UpdateInit() {
-  Update.onProgress([](int progress, size_t total) {
-    /* update from file */
-    SystemCamera.SetFlashStatus(true);
-    digitalWrite(FW_STATUS_LED_PIN, FW_STATUS_LED_LEVEL_ON);
-    uint8_t updateProgress = (progress * 100) / FirmwareUpdate.FirmwareSize;
-    SystemLog.AddEvent(LogLevel_Info, "Updating: " + String(FirmwareUpdate.FirmwareSize) + "/" + String(progress) + " -> " + String(updateProgress) + "%");
-    FirmwareUpdate.PercentProcess = updateProgress;
-    FirmwareUpdate.TransferedBytes = progress;
-    delay(10);
-    digitalWrite(FW_STATUS_LED_PIN, !FW_STATUS_LED_LEVEL_ON);
-  });
-}
-
-/**
-   @brief Main function for system lib
+   @brief Main function for system lib. Call it once per second
    @param none
    @return none
 */
 void System_Main() {
-  /* check new FW version */
-  if (false == FirmwareUpdate.CheckNewVersionAfterBoot) {
-    System_CheckNewVersion();
-  }
+  static uint16_t HealthCheckCounter = 0;
 
-  /* task for download and flash FW from server */
-  System_OtaCloudUpdate();
-}
-
-/**
-   @brief Function for check FW version on the WEB server
-
-    https://docs.github.com/en/rest/releases/releases?apiVersion=2022-11-28
-
-   @param none
-   @return none
-*/
-void System_CheckNewVersion() {
-  if (WL_CONNECTED == WiFi.status()) {
-    SystemLog.AddEvent(LogLevel_Info, F("Check new FW version from OTA"));
-    FirmwareUpdate.CheckNewVersionAfterBoot = true;
-    WiFiClientSecure client;
-    client.setCACert(root_CAs_ota);
-    //client.setInsecure();
-    FirmwareUpdate.CheckNewVersionFwStatus = F("N/A");
-    FirmwareUpdate.NewVersionFw = F("Unknown");
-    FirmwareUpdate.OtaUpdateFwUrl = "";
-    FirmwareUpdate.OtaUpdateFwAvailable = false;
-
-    /* connect to server and get json */
-    if (!client.connect(OTA_UPDATE_API_SERVER, 443)) {
-      FirmwareUpdate.CheckNewVersionFwStatus = F("Failed connect to OTA server!");
-      SystemLog.AddEvent(LogLevel_Info, FirmwareUpdate.CheckNewVersionFwStatus);
-
-    } else {
-      SystemLog.AddEvent(LogLevel_Verbose, F("Connected to server!"));
-      client.println("GET https://" + String(OTA_UPDATE_API_SERVER) + String(OTA_UPDATE_API_URL) + " HTTP/1.0");
-      client.println("Host: " + String(OTA_UPDATE_API_SERVER));
-      client.println("User-Agent: " + String(DEVICE_HOSTNAME));
-      client.println("Connection: close");
-      client.println();
-
-      while (client.connected()) {
-        String line = client.readStringUntil('\n');
-        if (line == "\r") {
-          SystemLog.AddEvent(LogLevel_Verbose, "headers received: " + line);
-          break;
-        }
-      }
-
-      /* wait for data, and read it */
-      delay(350);
-      String Data = "";
-      while (client.connected()) {
-        while (client.available()) {
-          Data += (char)client.read();
-        }
-      }
-
-      SystemLog.AddEvent(LogLevel_Verbose, Data);
-      client.stop();
-
-      /* json analyzed */
-      JsonDocument jsonDoc;
-      DeserializationError error = deserializeJson(jsonDoc, Data);
-
-      if (error) {
-        FirmwareUpdate.CheckNewVersionFwStatus = F("Failed to parse JSON from OTA server!");
-        SystemLog.AddEvent(LogLevel_Warning, FirmwareUpdate.CheckNewVersionFwStatus);
-        SystemLog.AddEvent(LogLevel_Warning, Data);
-
-      } else {
-        const char *firmwareVersion = jsonDoc["tag_name"];
-        if (firmwareVersion) {
-          FirmwareUpdate.CheckNewVersionFwStatus = F("Download successful");
-          FirmwareUpdate.NewVersionFw = firmwareVersion;
-          SystemLog.AddEvent(LogLevel_Info, "Available OTA firmware: " + FirmwareUpdate.NewVersionFw);
-
-          /* get assets */
-          JsonArray assets = jsonDoc["assets"];
-          int assetsCount = assets.size();
-          SystemLog.AddEvent(LogLevel_Info, "Assets count: " + String(assetsCount));
-          for(int i = 0; i < assetsCount; i++) {
-            JsonObject asset = assets[i];
-            const char* name = asset["name"];
-            SystemLog.AddEvent(LogLevel_Info, "Assets[" + String(i) + "]: " + String(name));
-
-            /* get FW file and URL */
-            if (strcmp_P(name, OTA_UPDATE_FW_FILE) == 0) {
-              /* get download URL */
-              const char* download_url = asset["browser_download_url"];
-              FirmwareUpdate.OtaUpdateFwUrl = download_url;
-              SystemLog.AddEvent(LogLevel_Info, "Found FW file: " + String(name) + " URL: " + FirmwareUpdate.OtaUpdateFwUrl);
-              FirmwareUpdate.OtaUpdateFwAvailable = true;
-            }
-          }
-        } else {
-          FirmwareUpdate.CheckNewVersionFwStatus = F("JSON key 'tag_name' from OTA server not found!");
-          SystemLog.AddEvent(LogLevel_Warning, FirmwareUpdate.CheckNewVersionFwStatus);
-        }
-      }
+  /* restart after a firmware upload from the WEB page. Wait one cycle, the WEB server sends the answer to the browser */
+  static bool RestartWait = false;
+  if (true == FirmwareUpload.RestartPending) {
+    if (true == RestartWait) {
+      SystemLog.AddEvent(LogLevel_Warning, F("Restart MCU with the new firmware"));
+      SystemLog.LogFlushFile();
+      ESP.restart();
     }
+    RestartWait = true;
+  }
+
+  HealthCheckCounter++;
+  if (HealthCheckCounter >= HEALTH_CHECK_INTERVAL) {
+    HealthCheckCounter = 0;
+    System_CheckMemory();
   }
 }
 
 /**
-   @brief Function for check start OTA update from WEB server 
+   @brief Check the free memory. After a long time the memory can be fragmented: the big blocks for photos and TLS
+          are not available any more and the uploads fail. Restart the MCU when the memory stays low, when it does not matter
    @param none
    @return none
 */
-void System_OtaCloudUpdate() {
-  if (true == FirmwareUpdate.StartOtaUpdate) {
-    FirmwareUpdate.Processing = true;
-    FirmwareUpdate.StartOtaUpdate = false;
-    FirmwareUpdate.UpdatingStatus = F("Sync NTP time...");
-    SystemWifiMngt.SyncNtpTime();
-    FirmwareUpdate.UpdatingStatus = F("Start updating");
-    System_OtaUpdateStart();
+void System_CheckMemory() {
+  size_t internal = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+  size_t psram = psramFound() ? heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) : SIZE_MAX;
+  bool low = (internal < HEALTH_LOW_MEMORY_INTERNAL) || (psram < HEALTH_LOW_MEMORY_PSRAM);
+
+  if (false == low) {
+    if (true == SystemHealth.LowMemory) {
+      SystemLog.AddEvent(LogLevel_Info, F("Free memory is OK again"));
+    }
+    SystemHealth.LowMemory = false;
+    SystemHealth.LowMemoryTime = 0;
+    return;
+  }
+
+  if (false == SystemHealth.LowMemory) {
+    SystemLog.AddEvent(LogLevel_Warning, "Low memory! Largest free block, internal: " + String(internal) + " B, PSRAM: " + String(psram) + " B");
+  }
+  SystemHealth.LowMemory = true;
+  SystemHealth.LowMemoryTime += HEALTH_CHECK_INTERVAL;
+
+  /* restart when nobody watches the stream and the printer is not printing. While printing, restart only when the memory does not get better */
+  bool printing = (true == SystemPrusaLink.GetEnable()) && (true == SystemPrusaLink.GetReachable()) && (true == SystemPrusaLink.GetPrinting());
+  bool idle = (0 == SystemCamera.GetStreamClients()) && (false == printing) && (false == System_FirmwareUploadActive());
+
+  if (((true == idle) && (SystemHealth.LowMemoryTime >= HEALTH_LOW_MEMORY_RESTART)) || (SystemHealth.LowMemoryTime >= HEALTH_LOW_MEMORY_FORCE)) {
+    SystemLog.AddEvent(LogLevel_Error, F("Memory is low for a long time. Restart MCU!"));
+    SystemLog.LogFlushFile();
+    System_RestartMcu(SystemRestart_LowMemory);
   }
 }
 
 /**
-   @brief Function for downloading FW and flash new FW to the memmory
-
-    https://github.com/espressif/arduino-esp32/blob/master/libraries/HTTPUpdate/src/HTTPUpdate.h
-
+   @brief Camera health for Prusa Connect. The most important problem wins
    @param none
-   @return bool - true if update is done
+   @return String - short problem description, empty when everything is OK
 */
-bool System_OtaUpdateStart() {
-  bool b_ret = false;
-  WiFiClientSecure client;
-
-  /* check if new FW version is available */
-  if (FirmwareUpdate.OtaUpdateFwAvailable == false) {
-    FirmwareUpdate.UpdatingStatus = SYSTEM_MSG_UPDATE_NO_FW;
-    SystemLog.AddEvent(LogLevel_Info, FirmwareUpdate.UpdatingStatus);
-    FirmwareUpdate.Processing = false;
-
-    return b_ret;
+String System_GetHealthStatus() {
+  if (true == McuTemperature.ThermalThrottling) {
+    return F("HOT");
   }
-  /* reset wdg */
-  esp_task_wdt_reset();
+  if (true == SystemHealth.LowMemory) {
+    return F("LOW MEMORY");
+  }
+  if (true == Connect.GetCaptureFailed()) {
+    return F("CAMERA ERROR");
+  }
+  if (true == SystemPrusaLink.GetLoginError()) {
+    return F("PRUSALINK LOGIN");
+  }
+  return "";
+}
 
-  /* set certificat for secure connection, set timeout and follow redirect */
-  client.setCACert(root_CAs_ota);
-  // client.setInsecure();
-  client.setTimeout(12000 / SECOND_TO_MILISECOND);  /* timeout argument is defined in seconds for setTimeout */
-  httpUpdate.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS); /* HTTPC_FORCE_FOLLOW_REDIRECTS */
-
-  /* set callback function */
-  httpUpdate.onStart(System_OtaUpdateStartCB);
-  httpUpdate.onEnd(System_OtaUpdateEndCB);
-  httpUpdate.onError(System_OtaUpdateErrorCB);
-  httpUpdate.onProgress(System_OtaUpdateProgressCB);
-
-  /* mcu configuration */
-  httpUpdate.rebootOnUpdate(false);
-  FirmwareUpdate.UpdatingStatus = SYSTEM_MSG_UPDATE_PROCESS;
-  httpUpdate.setLedPin(FW_STATUS_LED_PIN, FW_STATUS_LED_LEVEL_ON);
-
-  SystemLog.AddEvent(LogLevel_Info, F("Start OTA update URL: "), FirmwareUpdate.OtaUpdateFwUrl + ";");
-
-  /* start update */
-  t_httpUpdate_return ret = httpUpdate.update(client, FirmwareUpdate.OtaUpdateFwUrl.c_str());
-
-  /* check result */
-  switch (ret) {
-    case HTTP_UPDATE_FAILED:
-      b_ret = true;
-      FirmwareUpdate.UpdatingStatus = String(SYSTEM_MSG_UPDATE_FAIL) + "[" + String(httpUpdate.getLastError()) + "]: " + httpUpdate.getLastErrorString();
+/**
+   @brief Short restart reason for the WEB page
+   @param esp_reset_reason_t - reset reason from the chip
+   @param SystemRestartReason_enum - reason of an automatic restart by the firmware
+   @return String - reason
+*/
+String System_GetRestartReasonText(esp_reset_reason_t i_reason, SystemRestartReason_enum i_automatic) {
+  switch (i_automatic) {
+    case SystemRestart_LowMemory:
+      return F("Automatic restart: low memory");
+    case SystemRestart_WiFiLost:
+      return F("Automatic restart: WiFi connection lost");
+    case SystemRestart_CameraInit:
+      return F("Automatic restart: camera init failed");
+    default:
       break;
-
-    case HTTP_UPDATE_NO_UPDATES:
-      FirmwareUpdate.UpdatingStatus = F("No updates");
-      break;
-
-    case HTTP_UPDATE_OK:
-      FirmwareUpdate.UpdatingStatus = SYSTEM_MSG_UPDATE_DONE;
-      break;
   }
-  FirmwareUpdate.Processing = false;
-  SystemLog.AddEvent(LogLevel_Info, F("OTA update DONE. "), FirmwareUpdate.UpdatingStatus);
 
-  return b_ret;
+  switch (i_reason) {
+    case ESP_RST_POWERON:
+      return F("Power on");
+    case ESP_RST_SW:
+      return F("Restart from the web page, settings or serial port");
+    case ESP_RST_USB:
+      return F("Restart by USB (flashing or serial monitor)");
+    case ESP_RST_PANIC:
+    case ESP_RST_CPU_LOCKUP:
+      return F("Crash (exception)");
+    case ESP_RST_INT_WDT:
+    case ESP_RST_TASK_WDT:
+    case ESP_RST_WDT:
+      return F("Watchdog: a task was stuck");
+    case ESP_RST_BROWNOUT:
+    case ESP_RST_PWR_GLITCH:
+      return F("Power drop (brownout)");
+    default:
+      return "Other (" + String((int)i_reason) + ")";
+  }
 }
 
 /**
-   @brief CB function OTA update process 
-   @param int - current bytes
-   @param int - total bytes
-   @return none
+   @brief Check if the restart was not requested by the user: crash, watchdog, power drop or automatic restart
+   @param esp_reset_reason_t - reset reason from the chip
+   @param SystemRestartReason_enum - reason of an automatic restart by the firmware
+   @return bool - true for an unplanned restart
 */
-void System_OtaUpdateProgressCB(int cur, int total) {
-  /* OTA update from server */
-  FirmwareUpdate.FirmwareSize = total;
-  uint8_t updateProgress = (cur * 100) / FirmwareUpdate.FirmwareSize;
-  FirmwareUpdate.PercentProcess = updateProgress;
-  FirmwareUpdate.TransferedBytes = cur;
-  SystemLog.AddEvent(LogLevel_Info, "Downloaded: " + String(cur) + "/" + String(FirmwareUpdate.FirmwareSize) + " -> " + String(FirmwareUpdate.PercentProcess) + "%");
-}
-
-/**
-   @brief CB function start OTA update
-   @param none
-   @return none
-*/
-void System_OtaUpdateStartCB() {
-  SystemLog.AddEvent(LogLevel_Info, F("Start OTA update"));
-}
-
-/**
-   @brief CB function start OTA update
-   @param none
-   @return none
-*/
-void System_OtaUpdateEndCB() {
-  SystemLog.AddEvent(LogLevel_Info, F("OTA update done"));
-}
-
-/**
-   @brief CB function error OTA update
-   @param int - error code
-   @return none
-*/
-void System_OtaUpdateErrorCB(int error) {
-  SystemLog.AddEvent(LogLevel_Info, "OTA update error: " + String(error));
+bool System_IsUnplannedRestart(esp_reset_reason_t i_reason, SystemRestartReason_enum i_automatic) {
+  return (SystemRestart_None != i_automatic) || (ESP_RST_PANIC == i_reason) || (ESP_RST_INT_WDT == i_reason) ||
+         (ESP_RST_TASK_WDT == i_reason) || (ESP_RST_WDT == i_reason) || (ESP_RST_BROWNOUT == i_reason) ||
+         (ESP_RST_PWR_GLITCH == i_reason) || (ESP_RST_CPU_LOCKUP == i_reason);
 }
 
 /**
@@ -449,18 +341,20 @@ String System_printMcuResetReasonSimple() {
    @return none
 */
 void System_TaskWifiManagement(void *pvParameters) {
-  SystemLog.AddEvent(LogLevel_Info, F("Task Wifi Management. core: "), String(xPortGetCoreID()));
+  SystemLog.AddEvent(LogLevel_Info, F("Task Wi-Fi Management. core: "), String(xPortGetCoreID()));
   TickType_t xLastWakeTime = xTaskGetTickCount();
 
   while (1) {
     /* wifi management. Enable/disable AP_STA mode and STA mode*/
     SystemWifiMngt.WifiManagement();
-    McuTemperature.TemperatureCelsius = temperatureRead();
 
     /* wifi reconnect after signal lost */
     SystemWifiMngt.WiFiReconnect();
-    SystemLog.AddEvent(LogLevel_Verbose, F("WiFiManagement task. Stack free size: "), String(uxTaskGetStackHighWaterMark(NULL)) + "B");
-    SystemLog.AddEvent(LogLevel_Verbose, F("WiFi status: "), String(WiFi.status()));
+    /* build the verbose message only when it is logged */
+    if (SystemLog.GetLogLevel() >= LogLevel_Verbose) {
+      SystemLog.AddEvent(LogLevel_Verbose, F("WiFiManagement task. Stack free size: "), String(uxTaskGetStackHighWaterMark(NULL)) + "B");
+      SystemLog.AddEvent(LogLevel_Verbose, F("Wi-Fi status: "), String(WiFi.status()));
+    }
 
     /* reset wdg */
     esp_task_wdt_reset();
@@ -481,10 +375,12 @@ void System_TaskMain(void *pvParameters) {
   TickType_t xLastWakeTime = xTaskGetTickCount();
 
   while (1) {
-    /* for ota update */
     esp_task_wdt_reset();
     System_Main();
-    SystemLog.AddEvent(LogLevel_Verbose, F("System task. Stack free size: "), String(uxTaskGetStackHighWaterMark(NULL)) + "B");
+    /* build the verbose message only when it is logged */
+    if (SystemLog.GetLogLevel() >= LogLevel_Verbose) {
+      SystemLog.AddEvent(LogLevel_Verbose, F("System task. Stack free size: "), String(uxTaskGetStackHighWaterMark(NULL)) + "B");
+    }
 
     /* reset wdg */
     esp_task_wdt_reset();
@@ -492,6 +388,97 @@ void System_TaskMain(void *pvParameters) {
     /* next start task */
     vTaskDelayUntil(&xLastWakeTime, TASK_SYSTEM / portTICK_PERIOD_MS);
   }
+}
+
+/**
+ * @brief Read MCU temperature and update the thermal throttling state, with hysteresis.
+ *        The XIAO ESP32-S3 inside the heated chamber of a printer can overheat
+ * 
+ * @param none
+ * @return none
+ */
+void System_CheckThermalState() {
+  float raw = System_ReadMcuTemperature();
+  if (isnan(raw)) {
+    return;
+  }
+
+  /* average of the readings: the first reading starts it */
+  float temp = (0.0 == McuTemperature.TemperatureCelsius) ? raw : (McuTemperature.TemperatureCelsius + THERMAL_FILTER_FACTOR * (raw - McuTemperature.TemperatureCelsius));
+  McuTemperature.TemperatureCelsius = temp;
+  if (temp > McuTemperature.TemperatureMax) {
+    McuTemperature.TemperatureMax = temp;
+  }
+
+  /* first level: slower stream */
+  if ((false == McuTemperature.StreamSlow) && (temp >= THERMAL_STREAM_SLOW_TEMP)) {
+    McuTemperature.StreamSlow = true;
+    SystemLog.AddEvent(LogLevel_Warning, "MCU temperature is high: " + String(temp) + " *C. Stream slowed down");
+  } else if ((true == McuTemperature.StreamSlow) && (temp <= THERMAL_STREAM_NORMAL_TEMP)) {
+    McuTemperature.StreamSlow = false;
+    SystemLog.AddEvent(LogLevel_Info, "MCU temperature: " + String(temp) + " *C. Normal stream speed");
+  }
+
+  /* second level: stream stopped, uploads slowed down */
+
+  if ((false == McuTemperature.ThermalThrottling) && (temp >= THERMAL_THROTTLE_TEMP)) {
+    McuTemperature.ThermalThrottling = true;
+    SystemLog.AddEvent(LogLevel_Warning, "MCU temperature is too high: " + String(temp) + " *C. Stream stopped, uploads slowed down");
+  } else if ((true == McuTemperature.ThermalThrottling) && (temp <= THERMAL_RESUME_TEMP)) {
+    McuTemperature.ThermalThrottling = false;
+    SystemLog.AddEvent(LogLevel_Info, "MCU temperature is OK: " + String(temp) + " *C. Normal operation");
+  }
+}
+
+/**
+ * @brief Read the MCU temperature from the internal sensor. The sensor is installed on the first call with the range
+ *        THERMAL_SENSOR_RANGE_MIN - MAX. temperatureRead() of the Arduino core uses the range -10 - 80 °C, the throttling
+ *        limits are above it, so it must not be used (only one sensor installation is possible)
+ *
+ * @param none
+ * @return float - temperature [°C], NAN when the sensor does not work
+ */
+float System_ReadMcuTemperature() {
+  static temperature_sensor_handle_t sensor = NULL;
+  static bool failed = false;
+
+  if ((NULL == sensor) && (false == failed)) {
+    temperature_sensor_config_t config = TEMPERATURE_SENSOR_CONFIG_DEFAULT(THERMAL_SENSOR_RANGE_MIN, THERMAL_SENSOR_RANGE_MAX);
+    if ((ESP_OK != temperature_sensor_install(&config, &sensor)) || (ESP_OK != temperature_sensor_enable(sensor))) {
+      failed = true;
+      SystemLog.AddEvent(LogLevel_Error, F("MCU temperature sensor failed"));
+    }
+  }
+
+  float temp = NAN;
+  if ((false == failed) && (ESP_OK != temperature_sensor_get_celsius(sensor, &temp))) {
+    temp = NAN;
+  }
+
+  return temp;
+}
+
+/**
+ * @brief Get interval for the next photo upload. The longest interval wins:
+ *        - refresh interval, or backoff interval after a failed upload
+ *        - PrusaLink: PRUSALINK_IDLE_INTERVAL when the printer is reachable and is not printing
+ *        - thermal throttling: THERMAL_THROTTLE_INTERVAL
+ * 
+ * @param none
+ * @return uint16_t - interval [s]
+ */
+uint16_t System_GetUploadInterval() {
+  uint16_t interval = Connect.GetEffectiveInterval();
+
+  if ((true == SystemPrusaLink.GetEnable()) && (true == SystemPrusaLink.GetReachable()) && (false == SystemPrusaLink.GetPrinting())) {
+    interval = max(interval, (uint16_t)PRUSALINK_IDLE_INTERVAL);
+  }
+
+  if (true == McuTemperature.ThermalThrottling) {
+    interval = max(interval, (uint16_t)THERMAL_THROTTLE_INTERVAL);
+  }
+
+  return interval;
 }
 
 /**
@@ -505,17 +492,31 @@ void System_TaskCaptureAndSendPhoto(void *pvParameters) {
   TickType_t xLastWakeTime = xTaskGetTickCount();
 
   while (1) {
-    if (Connect.CheckSendingIntervalExpired()) {
+    System_CheckThermalState();
+
+    /* read printer state from PrusaLink. Upload immediately when the printer starts or finishes printing */
+    SystemPrusaLink.Loop();
+    if ((true == SystemPrusaLink.ConsumeStateChange()) && (0 == Connect.GetBackoffInterval())) {
+      SystemLog.AddEvent(LogLevel_Info, F("Printer state changed, send photo now"));
+      Connect.SetSendingIntervalExpired();
+    }
+
+    /* camera problems are shown in Prusa Connect */
+    Connect.SetHealthStatus(System_GetHealthStatus());
+
+    if (Connect.CheckSendingIntervalExpired(System_GetUploadInterval())) {
       Connect.SetSendingIntervalCounter(0);
-      /* send network information to backend */
-      if ((WL_CONNECTED == WiFi.status()) && (false == FirmwareUpdate.Processing)) {
+      bool InfoOk = true;
+
+      /* send camera information to backend */
+      if ((WL_CONNECTED == WiFi.status()) && (false == System_FirmwareUploadActive())) {
         SystemLog.AddEvent(LogLevel_Verbose, F("Task photo processing. Start sending info"));
         esp_task_wdt_reset();
-        Connect.SendInfoToBackend();
+        InfoOk = Connect.SendInfoToBackend();
       }
 
-      /* send photo to backend*/
-      if ((WL_CONNECTED == WiFi.status()) && (false == FirmwareUpdate.Processing)) {
+      /* send photo to backend. Skip it when the backend is not reachable */
+      if ((WL_CONNECTED == WiFi.status()) && (false == System_FirmwareUploadActive()) && (true == InfoOk)) {
         SystemLog.AddEvent(LogLevel_Verbose, F("Task photo processing. Start sending photo"));
         esp_task_wdt_reset();
         Connect.TakePictureAndSendToBackend();
@@ -526,7 +527,10 @@ void System_TaskCaptureAndSendPhoto(void *pvParameters) {
       Connect.IncreaseSendingIntervalCounter();
     }
     
-    SystemLog.AddEvent(LogLevel_Verbose, F("Photo processing task. Stack free size: "), String(uxTaskGetStackHighWaterMark(NULL)) + "B");
+    /* build the verbose message only when it is logged */
+    if (SystemLog.GetLogLevel() >= LogLevel_Verbose) {
+      SystemLog.AddEvent(LogLevel_Verbose, F("Photo processing task. Stack free size: "), String(uxTaskGetStackHighWaterMark(NULL)) + "B");
+    }
 
     /* reset wdg */
     esp_task_wdt_reset();
@@ -548,6 +552,9 @@ void System_TaskSdCardCheck(void *pvParameters) {
 
   while (1) {
     esp_task_wdt_reset();
+    /* write buffered log messages to the card */
+    SystemLog.LogFlushFile();
+
     /* check micro SD card */
     if ((true == SystemLog.GetCardDetectAfterBoot()) && (false == SystemLog.GetCardDetectedStatus())) {
       SystemLog.LogCloseFile();
@@ -578,7 +585,10 @@ void System_TaskSdCardCheck(void *pvParameters) {
     }
 
     SystemLog.AddEvent(LogLevel_Info, "CardStatus: " + String(SystemLog.GetCardDetectedStatus()) + " FileStatus: " + String(SystemLog.GetLogFileOpened()));
-    SystemLog.AddEvent(LogLevel_Verbose, F("MicroSdCard task. Stack free size: "), String(uxTaskGetStackHighWaterMark(NULL)) + "B");
+    /* build the verbose message only when it is logged */
+    if (SystemLog.GetLogLevel() >= LogLevel_Verbose) {
+      SystemLog.AddEvent(LogLevel_Verbose, F("MicroSdCard task. Stack free size: "), String(uxTaskGetStackHighWaterMark(NULL)) + "B");
+    }
 
     /* reset wdg */
     esp_task_wdt_reset();
@@ -601,7 +611,10 @@ void System_TaskSerialCfg(void *pvParameters) {
   while (1) {
     esp_task_wdt_reset();
     SystemSerialCfg.ProcessIncommingData();
-    SystemLog.AddEvent(LogLevel_Verbose, F("SerialCfg task. Stack free size: "), String(uxTaskGetStackHighWaterMark(NULL)) + "B");
+    /* build the verbose message only when it is logged */
+    if (SystemLog.GetLogLevel() >= LogLevel_Verbose) {
+      SystemLog.AddEvent(LogLevel_Verbose, F("SerialCfg task. Stack free size: "), String(uxTaskGetStackHighWaterMark(NULL)) + "B");
+    }
 
     /* reset wdg */
     esp_task_wdt_reset();
@@ -623,7 +636,10 @@ void System_TaskSystemTelemetry(void *pvParameters) {
 
   while (1) {
     esp_task_wdt_reset();
-    SystemLog.AddEvent(LogLevel_Verbose, F("SystemTelemetry task. Stack free size: "), String(uxTaskGetStackHighWaterMark(NULL)) + "B");
+    /* build the verbose message only when it is logged */
+    if (SystemLog.GetLogLevel() >= LogLevel_Verbose) {
+      SystemLog.AddEvent(LogLevel_Verbose, F("SystemTelemetry task. Stack free size: "), String(uxTaskGetStackHighWaterMark(NULL)) + "B");
+    }
     if (SystemCamera.GetStreamStatus()) {
       char buf[80] = { '\0' };
       sprintf(buf, "Stream, average data in %dsec. FPS: %.1f, Size: %uKB", (TASK_SYSTEM_TELEMETRY / SECOND_TO_MILISECOND), SystemCamera.StreamGetFrameAverageFps(), SystemCamera.StreamGetFrameAverageSize());
@@ -631,11 +647,9 @@ void System_TaskSystemTelemetry(void *pvParameters) {
       SystemCamera.StreamClearFrameData();
     }
 
-    SystemLog.AddEvent(LogLevel_Info, "Free RAM: " + String(ESP.getFreeHeap()) + " B" + ", Min: " + String(ESP.getMinFreeHeap()));
-    SystemLog.AddEvent(LogLevel_Info, "Free PSRAM: " + String(ESP.getFreePsram()) + " B" + ", Min: " + String(ESP.getMinFreePsram()));
+    SystemLog.AddEvent(LogLevel_Info, "Free RAM: " + String(ESP.getFreeHeap()) + " B" + ", Min: " + String(ESP.getMinFreeHeap()) + ", Largest block: " + String(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)));
+    SystemLog.AddEvent(LogLevel_Info, "Free PSRAM: " + String(ESP.getFreePsram()) + " B" + ", Min: " + String(ESP.getMinFreePsram()) + ", Largest block: " + String(heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM)));
     SystemLog.AddEvent(LogLevel_Info, "MCU Temperature: " + String(McuTemperature.TemperatureCelsius) + " *C");
-
-    ExternalTemperatureSensor.ReadSensorData();
 
     /* reset wdg */
     esp_task_wdt_reset();
@@ -659,7 +673,10 @@ void System_TaskSysLed(void *pvParameters) {
     system_led.toggle();
     /* reset wdg */
     esp_task_wdt_reset();
-    SystemLog.AddEvent(LogLevel_Verbose, F("SystemLed task. Stack free size: "), String(uxTaskGetStackHighWaterMark(NULL)) + "B"); 
+    /* build the verbose message only when it is logged */
+    if (SystemLog.GetLogLevel() >= LogLevel_Verbose) {
+      SystemLog.AddEvent(LogLevel_Verbose, F("SystemLed task. Stack free size: "), String(uxTaskGetStackHighWaterMark(NULL)) + "B");
+    }
 
     /* next start task */
     vTaskDelayUntil(&xLastWakeTime, system_led.getTimer() / portTICK_PERIOD_MS);
@@ -679,7 +696,10 @@ void System_TaskWiFiWatchdog(void *pvParameters) {
   while (1) {
     esp_task_wdt_reset();
     SystemWifiMngt.WiFiWatchdog();
-    SystemLog.AddEvent(LogLevel_Verbose, F("WiFiWatchdog task. Stack free size: "), String(uxTaskGetStackHighWaterMark(NULL)) + "B");
+    /* build the verbose message only when it is logged */
+    if (SystemLog.GetLogLevel() >= LogLevel_Verbose) {
+      SystemLog.AddEvent(LogLevel_Verbose, F("WiFiWatchdog task. Stack free size: "), String(uxTaskGetStackHighWaterMark(NULL)) + "B");
+    }
 
     /* reset wdg */
     esp_task_wdt_reset();
@@ -719,7 +739,10 @@ void System_TaskSdCardRemove(void *pvParameters) {
         }
       }
     
-    SystemLog.AddEvent(LogLevel_Verbose, F("MicroSdCard task. Stack free size: "), String(uxTaskGetStackHighWaterMark(NULL)) + "B");
+    /* build the verbose message only when it is logged */
+    if (SystemLog.GetLogLevel() >= LogLevel_Verbose) {
+      SystemLog.AddEvent(LogLevel_Verbose, F("MicroSdCard task. Stack free size: "), String(uxTaskGetStackHighWaterMark(NULL)) + "B");
+    }
 
     /* reset wdg */
     esp_task_wdt_reset();

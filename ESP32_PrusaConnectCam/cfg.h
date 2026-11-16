@@ -20,7 +20,7 @@
 #include "log.h"
 #include "log_level.h"
 #include "mcu_cfg.h"
-#include "module_templates.h"
+#include "module_XIAO_ESP32-S3-cam.h"
 #include "var.h"
 #include "wifi_mngt.h"
 
@@ -32,7 +32,7 @@ public:
   bool CheckActifeWifiCfgFlag();
   void CheckResetCfg();
 
-  void SaveRefreshInterval(uint8_t);
+  void SaveRefreshInterval(uint16_t);
   void SaveToken(String);
   void SaveFingerprint(String);
   void SavePhotoQuality(uint8_t);
@@ -57,8 +57,6 @@ public:
   void SaveBasicAuthUsername(String);
   void SaveBasicAuthPassword(String);
   void SaveBasicAuthFlag(bool);
-  void SaveCameraFlashEnable(uint8_t);
-  void SaveCameraFlashTime(uint16_t);
   void SaveMdnsRecord(String);
   void SaveAec2(bool);
   void SaveAeLevel(int8_t);
@@ -74,10 +72,19 @@ public:
   void SaveNetworkDns(String);
   void SaveCameraImageExifRotation(uint8_t);
   void SaveTimeLapseFunctionStatus(bool);
-  void SaveExternalTemperatureSensorEnable(bool);
-  void SaveExternalTemperatureSensorUnit(uint8_t);
+  void SavePrusaLinkEnable(bool);
+  void SavePrusaLinkHost(String);
+  void SavePrusaLinkUser(String);
+  void SavePrusaLinkPassword(String);
+  void SaveCameraSensor(uint8_t);
+  void SaveUnplannedRestarts(uint16_t);
+  void SaveStatusLedMode(uint8_t);
+  void SaveWifiEapEnable(bool);
+  void SaveWifiEapIdentity(String);
+  void SaveWifiEapUsername(String);
+  void SaveWifiEapPassword(String);
 
-  uint8_t LoadRefreshInterval();
+  uint16_t LoadRefreshInterval();
   String LoadToken();
   String LoadFingerprint();
   uint8_t LoadPhotoQuality();
@@ -101,8 +108,6 @@ public:
   String LoadBasicAuthUsername();
   String LoadBasicAuthPassword();
   bool LoadBasicAuthFlag();
-  bool LoadCameraFlashEnable();
-  uint16_t LoadCameraFlashTime();
   String LoadMdnsRecord();
   bool LoadAec2();
   int8_t LoadAeLevel();
@@ -118,14 +123,21 @@ public:
   String LoadNetworkDns();
   uint8_t LoadCameraImageExifRotation();
   bool LoadTimeLapseFunctionStatus();
-  bool LoadExternalTemperatureSensorEnable();
-  uint8_t LoadExternalTemperatureSensorUnit();
+  bool LoadPrusaLinkEnable();
+  String LoadPrusaLinkHost();
+  String LoadPrusaLinkUser();
+  String LoadPrusaLinkPassword();
+  uint8_t LoadCameraSensor();
+  uint16_t LoadUnplannedRestarts();
+  bool LoadWifiEapEnable();
+  String LoadWifiEapIdentity();
+  String LoadWifiEapUsername();
+  String LoadWifiEapPassword();
 
 private:
   Logs *Log;              ///< Pointer to Logs object
   String WiFiMacAddress;  ///< WiFi MAC address
 
-  void ReadCfg();
   void DefaultCfg();
   bool CheckFirstMcuStart();
   void SaveFirstMcuStartFlag(uint8_t);
